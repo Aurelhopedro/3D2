@@ -54,7 +54,7 @@ jobs:
           tar -xf "gltf_validator-${GLTF_VERSION}-linux64.tar.xz"
           sudo mv gltf_validator /usr/local/bin/gltf_validator
           sudo chmod +x /usr/local/bin/gltf_validator
-          gltf_validator --version
+          which gltf_validator
 
       # ── 5. Criar pasta de saída ───────────────────────────────────────────
       - name: Create output directory
