@@ -1,12 +1,12 @@
 """
 Medieval Character Generator — Blender 4.2 LTS headless
 ========================================================
-Gera um personagem medieval masculino completo:
-  - Basemesh humano via MPFB2 (HumanService)
-  - Rig Rigify completo via MPFB2 (RigService)
-  - Armadura medieval em low-poly (criada via bpy)
+Personagem medieval masculino completo:
+  - Basemesh humano via MPFB2 (com fallback paramétrico)
+  - Rig Rigify
+  - Armadura medieval low-poly (8 peças)
   - Materiais PBR compatíveis com glTF
-  - Câmara e iluminação de estúdio
+  - Câmara + iluminação de estúdio
   - Exportação: character.glb + character.blend + character_preview.png + character_report.json
 
 Uso:
@@ -23,7 +23,7 @@ import argparse
 
 import bpy
 import bmesh
-from mathutils import Vector, Matrix
+from mathutils import Vector
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 0. Argumentos
@@ -64,23 +64,17 @@ def step(name):
     report["steps"].append(name)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Utilitário: importação dinâmica dos módulos MPFB2
-#    (necessário porque as extensões Blender ficam em caminhos variáveis)
+# 1. Importação dinâmica dos módulos MPFB2
 # ─────────────────────────────────────────────────────────────────────────────
 
 def dynamic_import(absolute_package_str, key):
-    """
-    Importa um símbolo de um módulo MPFB2 pelo sufixo do nome do módulo.
-    Padrão obrigatório para extensões Blender 4.x.
-    """
     for amod in sys.modules:
         if amod.endswith(absolute_package_str):
             mod = importlib.import_module(amod)
             if not hasattr(mod, key):
                 raise AttributeError(f"Module {amod} has no attribute '{key}'")
             return getattr(mod, key)
-    raise ValueError(f"No loaded module ends with '{absolute_package_str}'. "
-                     "Is MPFB2 installed and registered?")
+    raise ValueError(f"No loaded module ends with '{absolute_package_str}'")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Cena limpa
@@ -93,47 +87,50 @@ scene.name = "MedievalCharacter"
 log("Scene cleared")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Ativar add-ons necessários
+# 3. Ativar add-ons
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Enable add-ons")
 
-# Rigify (vem com o Blender)
-bpy.ops.preferences.addon_enable(module="rigify")
-log("Rigify enabled")
+try:
+    bpy.ops.preferences.addon_enable(module="rigify")
+    log("Rigify enabled")
+except Exception as e:
+    log(f"Rigify enable failed: {e}", "WARN")
 
-# MPFB2 (instalado como extensão pelo workflow)
 mpfb_enabled = False
 for addon in bpy.context.preferences.addons.keys():
     if "mpfb" in addon.lower():
         mpfb_enabled = True
-        log(f"MPFB2 already registered as: {addon}")
+        log(f"MPFB2 already registered: {addon}")
         break
 
 if not mpfb_enabled:
-    try:
-        bpy.ops.preferences.addon_enable(module="mpfb")
-        mpfb_enabled = True
-        log("MPFB2 enabled via addon_enable")
-    except Exception as e:
-        log(f"addon_enable failed: {e}", "WARN")
-
-    # Tentar via extensions
-    if not mpfb_enabled:
+    for method, kwargs in [
+        ("addon_enable", {"module": "mpfb"}),
+        ("extensions.package_enable", {"package": "mpfb", "repo_index": 0}),
+    ]:
         try:
-            bpy.ops.extensions.package_enable(package="mpfb", repo_index=0)
+            op = bpy.ops
+            for part in method.split("."):
+                op = getattr(op, part)
+            op(**kwargs)
             mpfb_enabled = True
-            log("MPFB2 enabled via extensions")
+            log(f"MPFB2 enabled via {method}")
+            break
         except Exception as e:
-            log(f"extensions enable failed: {e}", "WARN")
+            log(f"{method} failed: {e}", "WARN")
 
-bpy.ops.wm.save_userpref()
+try:
+    bpy.ops.wm.save_userpref()
+except Exception:
+    pass
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Gerar basemesh humano com MPFB2
+# 4. Basemesh humano via MPFB2
 # ─────────────────────────────────────────────────────────────────────────────
 
-step("Generate human basemesh via MPFB2")
+step("Generate human basemesh")
 
 basemesh = None
 use_mpfb = False
@@ -144,76 +141,53 @@ if mpfb_enabled:
         basemesh = HumanService.create_human()
         basemesh.name = "MedievalHuman"
         use_mpfb = True
-        log(f"Basemesh created: {basemesh.name} ({len(basemesh.data.vertices)} verts)")
+        log(f"MPFB2 basemesh: {basemesh.name} ({len(basemesh.data.vertices)} verts)")
     except Exception as e:
         log(f"MPFB2 HumanService failed: {e}", "WARN")
-        log("Falling back to parametric basemesh", "WARN")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4b. Fallback: basemesh paramétrico (humano ~1.80m) se MPFB2 falhar
+# 4b. Fallback paramétrico
 # ─────────────────────────────────────────────────────────────────────────────
 
 if basemesh is None:
-    log("Building parametric human body")
-
+    log("Building parametric human body (fallback)")
     mesh = bpy.data.meshes.new("HumanMesh")
     basemesh = bpy.data.objects.new("MedievalHuman", mesh)
     scene.collection.objects.link(basemesh)
-
     bm = bmesh.new()
 
-    def add_capsule(bm, radius, height, segments=8, rings=4, offset_z=0.0):
-        """Adiciona uma cápsula (cilindro com hemisférios) ao bmesh."""
-        verts = []
-        # Corpo cilíndrico
-        for r in range(rings + 1):
-            z = offset_z + (r / rings) * height
-            ring_verts = []
-            for s in range(segments):
-                angle = (s / segments) * 2 * math.pi
-                x = radius * math.cos(angle)
-                y = radius * math.sin(angle)
-                ring_verts.append(bm.verts.new((x, y, z)))
-            verts.append(ring_verts)
-        # Faces laterais
-        for r in range(rings):
-            for s in range(segments):
-                v0 = verts[r][s]
-                v1 = verts[r][(s + 1) % segments]
-                v2 = verts[r + 1][(s + 1) % segments]
-                v3 = verts[r + 1][s]
-                bm.faces.new([v0, v1, v2, v3])
-        # Tampas
-        bot_center = bm.verts.new((0, 0, offset_z))
-        top_center = bm.verts.new((0, 0, offset_z + height))
+    def add_cylinder(bm, radius, height, segments=12, offset_z=0.0, offset_x=0.0):
+        bot, top = [], []
         for s in range(segments):
-            bm.faces.new([bot_center, verts[0][(s + 1) % segments], verts[0][s]])
-            bm.faces.new([top_center, verts[-1][s], verts[-1][(s + 1) % segments]])
-        return top_center.co.z
+            a = (s / segments) * 2 * math.pi
+            x, y = offset_x + radius * math.cos(a), radius * math.sin(a)
+            bot.append(bm.verts.new((x, y, offset_z)))
+            top.append(bm.verts.new((x, y, offset_z + height)))
+        for s in range(segments):
+            bm.faces.new([bot[s], bot[(s+1) % segments],
+                          top[(s+1) % segments], top[s]])
+        bc = bm.verts.new((offset_x, 0, offset_z))
+        tc = bm.verts.new((offset_x, 0, offset_z + height))
+        for s in range(segments):
+            bm.faces.new([bc, bot[(s+1) % segments], bot[s]])
+            bm.faces.new([tc, top[s], top[(s+1) % segments]])
 
-    # Pernas
-    add_capsule(bm, 0.07, 0.42, offset_z=0.0)      # perna direita
-    # Perna esquerda (offset X)
-    for r in range(5):
-        z = r * 0.42 / 4
-        for s in range(8):
-            angle = (s / 8) * 2 * math.pi
-            bm.verts.new((0.15 + 0.07 * math.cos(angle), 0.07 * math.sin(angle), z))
-
-    # Torso
-    add_capsule(bm, 0.18, 0.55, offset_z=0.42)
-    # Cabeça
-    add_capsule(bm, 0.12, 0.24, offset_z=1.42)
-    # Pescoço
-    add_capsule(bm, 0.055, 0.14, offset_z=1.28)
-    # Braços
-    add_capsule(bm, 0.055, 0.60, offset_z=0.75)   # braço direito
-    add_capsule(bm, 0.055, 0.60, offset_z=0.75)   # braço esquerdo
+    add_cylinder(bm, 0.07, 0.42, offset_z=0.0,  offset_x=-0.09)  # perna esq
+    add_cylinder(bm, 0.07, 0.42, offset_z=0.0,  offset_x= 0.09)  # perna dir
+    add_cylinder(bm, 0.18, 0.55, offset_z=0.42)                   # torso
+    add_cylinder(bm, 0.055, 0.14, offset_z=0.97)                  # pescoço
+    add_cylinder(bm, 0.12, 0.24, offset_z=1.11)                   # cabeça
+    add_cylinder(bm, 0.055, 0.55, offset_z=0.72, offset_x=-0.26)  # braço esq
+    add_cylinder(bm, 0.055, 0.55, offset_z=0.72, offset_x= 0.26)  # braço dir
 
     bm.to_mesh(mesh)
     bm.free()
     mesh.update()
-    log(f"Parametric basemesh created: {len(mesh.vertices)} verts")
+    log(f"Parametric basemesh: {len(mesh.vertices)} verts")
+
+# Garantir que o basemesh está na coleção
+if basemesh.name not in scene.collection.objects:
+    scene.collection.objects.link(basemesh)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Rig Rigify
@@ -226,156 +200,121 @@ rig_object = None
 if use_mpfb:
     try:
         SystemService = dynamic_import("mpfb.services.systemservice", "SystemService")
-        RigService = dynamic_import("mpfb.services.rigservice", "RigService")
+        RigService    = dynamic_import("mpfb.services.rigservice",    "RigService")
+        HumanService2 = dynamic_import("mpfb.services.humanservice",  "HumanService")
 
         if not SystemService.check_for_rigify():
-            raise RuntimeError("Rigify not available inside MPFB")
+            raise RuntimeError("Rigify not available")
 
-        metarig = dynamic_import("mpfb.services.humanservice", "HumanService")\
-            .__class__  # reload
-        HumanService2 = dynamic_import("mpfb.services.humanservice", "HumanService")
-        metarig = HumanService2.add_builtin_rig(basemesh, "rigify.human")
+        metarig    = HumanService2.add_builtin_rig(basemesh, "rigify.human")
         rig_object = RigService.generate_rigify_rig(metarig, meta_rig_action="delete")
-        log(f"Rigify rig generated via MPFB2: {rig_object.name}")
+        log(f"Rigify rig via MPFB2: {rig_object.name}")
     except Exception as e:
-        log(f"MPFB2 rig generation failed: {e}", "WARN")
-        use_mpfb = False
+        log(f"MPFB2 rig failed: {e}", "WARN")
 
 if rig_object is None:
-    log("Building Rigify metarig manually")
     try:
-        # Adicionar metarig humano padrão do Rigify
         bpy.ops.object.select_all(action='DESELECT')
         bpy.ops.object.armature_human_metarig_add()
         metarig = bpy.context.active_object
         metarig.name = "metarig"
-
-        # Escalar para altura ~1.80m
-        metarig.scale = (1.0, 1.0, 1.0)
-        bpy.ops.object.transform_apply(scale=True)
-
-        # Gerar rig completo
         bpy.context.view_layer.objects.active = metarig
+
         import rigify
         rigify.generate.generate_rig(bpy.context, metarig)
         rig_object = bpy.context.active_object
-        log(f"Rigify rig generated manually: {rig_object.name}")
+        log(f"Rigify rig manual: {rig_object.name}")
 
-        # Parear basemesh ao rig com pesos automáticos
         bpy.ops.object.select_all(action='DESELECT')
         basemesh.select_set(True)
         rig_object.select_set(True)
         bpy.context.view_layer.objects.active = rig_object
         bpy.ops.object.parent_set(type='ARMATURE_AUTO')
-        log("Basemesh parented to rig with automatic weights")
+        log("Basemesh parented with automatic weights")
     except Exception as e:
-        log(f"Manual Rigify generation failed: {e}", "WARN")
+        log(f"Manual Rigify failed: {e}", "WARN")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Armadura medieval (geometria low-poly)
+# 6. Armadura medieval (8 peças low-poly)
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Build medieval armor")
 
-def make_armor_piece(name, location, scale, segments=8):
-    """Cria uma peça de armadura cilíndrica baixo-polígono."""
+def make_armor_piece(name, location, radius, height, segments=10):
     mesh = bpy.data.meshes.new(f"{name}Mesh")
-    obj = bpy.data.objects.new(name, mesh)
+    obj  = bpy.data.objects.new(name, mesh)
     scene.collection.objects.link(obj)
-
     bm = bmesh.new()
-    # Cilindro simples como base da peça
-    verts_bot = []
-    verts_top = []
-    h = scale[2]
-    r = max(scale[0], scale[1])
+    bot, top = [], []
     for i in range(segments):
-        angle = (i / segments) * 2 * math.pi
-        x = r * math.cos(angle)
-        y = r * math.sin(angle)
-        verts_bot.append(bm.verts.new((x, y, 0.0)))
-        verts_top.append(bm.verts.new((x, y, h)))
+        a = (i / segments) * 2 * math.pi
+        x, y = radius * math.cos(a), radius * math.sin(a)
+        bot.append(bm.verts.new((x, y, 0.0)))
+        top.append(bm.verts.new((x, y, height)))
     for i in range(segments):
-        bm.faces.new([verts_bot[i], verts_bot[(i+1) % segments],
-                      verts_top[(i+1) % segments], verts_top[i]])
-    # Tampas
+        bm.faces.new([bot[i], bot[(i+1) % segments],
+                      top[(i+1) % segments], top[i]])
     bc = bm.verts.new((0, 0, 0))
-    tc = bm.verts.new((0, 0, h))
+    tc = bm.verts.new((0, 0, height))
     for i in range(segments):
-        bm.faces.new([bc, verts_bot[(i+1) % segments], verts_bot[i]])
-        bm.faces.new([tc, verts_top[i], verts_top[(i+1) % segments]])
-
-    bm.to_mesh(mesh)
-    bm.free()
-    mesh.update()
-    obj.location = location
+        bm.faces.new([bc, bot[(i+1) % segments], bot[i]])
+        bm.faces.new([tc, top[i], top[(i+1) % segments]])
+    bm.to_mesh(mesh); bm.free(); mesh.update()
+    obj.location = Vector(location)
     return obj
 
-# Peças da armadura posicionadas sobre o basemesh
-armor_pieces = {
-    "Helmet":        ((0, 0, 1.55), (0.145, 0.145, 0.22)),
-    "Breastplate":   ((0, 0, 0.72), (0.21,  0.18,  0.50)),
-    "Shoulder_R":    ((-0.30, 0, 1.00), (0.09, 0.09, 0.18)),
-    "Shoulder_L":    (( 0.30, 0, 1.00), (0.09, 0.09, 0.18)),
-    "Gauntlet_R":    ((-0.32, 0, 0.42), (0.065, 0.065, 0.20)),
-    "Gauntlet_L":    (( 0.32, 0, 0.42), (0.065, 0.065, 0.20)),
-    "Greave_R":      ((-0.10, 0, 0.0),  (0.08, 0.08, 0.40)),
-    "Greave_L":      (( 0.10, 0, 0.0),  (0.08, 0.08, 0.40)),
-}
+armor_defs = [
+    ("Helmet",      ( 0.00, 0, 1.55), 0.145, 0.22),
+    ("Breastplate", ( 0.00, 0, 0.72), 0.21,  0.50),
+    ("Shoulder_L",  (-0.30, 0, 1.00), 0.09,  0.18),
+    ("Shoulder_R",  ( 0.30, 0, 1.00), 0.09,  0.18),
+    ("Gauntlet_L",  (-0.32, 0, 0.42), 0.065, 0.20),
+    ("Gauntlet_R",  ( 0.32, 0, 0.42), 0.065, 0.20),
+    ("Greave_L",    (-0.10, 0, 0.00), 0.08,  0.40),
+    ("Greave_R",    ( 0.10, 0, 0.00), 0.08,  0.40),
+]
 
 armor_objects = []
-for pname, (loc, sc) in armor_pieces.items():
-    obj = make_armor_piece(pname, Vector(loc), sc)
+for name, loc, r, h in armor_defs:
+    obj = make_armor_piece(name, loc, r, h)
     armor_objects.append(obj)
-    log(f"  Armor piece: {pname}")
+    log(f"  {name}")
 
-log(f"Armor built: {len(armor_objects)} pieces")
+log(f"Armor: {len(armor_objects)} pieces")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. Materiais PBR (compatíveis com glTF)
+# 7. Materiais PBR (compatíveis glTF)
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Apply PBR materials")
 
-def make_material(name, base_color, metallic=0.0, roughness=0.5, emission=None):
+def make_material(name, base_color, metallic=0.0, roughness=0.5):
     mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
     nodes.clear()
-
     bsdf = nodes.new("ShaderNodeBsdfPrincipled")
     bsdf.inputs["Base Color"].default_value = (*base_color, 1.0)
-    bsdf.inputs["Metallic"].default_value = metallic
-    bsdf.inputs["Roughness"].default_value = roughness
-    if emission:
-        bsdf.inputs["Emission Color"].default_value = (*emission, 1.0)
-        bsdf.inputs["Emission Strength"].default_value = 0.5
-
+    bsdf.inputs["Metallic"].default_value   = metallic
+    bsdf.inputs["Roughness"].default_value  = roughness
     out = nodes.new("ShaderNodeOutputMaterial")
     links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
     return mat
 
-# Paleta medieval
-mat_skin     = make_material("Skin",        (0.80, 0.60, 0.45), metallic=0.0, roughness=0.6)
-mat_steel    = make_material("Steel",       (0.72, 0.72, 0.75), metallic=0.95, roughness=0.25)
-mat_leather  = make_material("Leather",     (0.28, 0.14, 0.06), metallic=0.0, roughness=0.85)
-mat_eyes     = make_material("Eyes",        (0.05, 0.25, 0.60), metallic=0.0, roughness=0.05)
+mat_skin  = make_material("Skin",    (0.80, 0.60, 0.45), 0.0,  0.60)
+mat_steel = make_material("Steel",   (0.72, 0.72, 0.75), 0.95, 0.25)
 
-# Atribuir material ao basemesh
-if basemesh.data.materials:
-    basemesh.data.materials[0] = mat_skin
-else:
-    basemesh.data.materials.append(mat_skin)
-log("Skin material applied")
-
-# Atribuir aço às peças de armadura
-for obj in armor_objects:
+def assign_mat(obj, mat):
     if obj.data.materials:
-        obj.data.materials[0] = mat_steel
+        obj.data.materials[0] = mat
     else:
-        obj.data.materials.append(mat_steel)
-log("Steel material applied to armor")
+        obj.data.materials.append(mat)
+
+assign_mat(basemesh, mat_skin)
+for obj in armor_objects:
+    assign_mat(obj, mat_steel)
+log("Materials assigned")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. Iluminação de estúdio
@@ -383,110 +322,126 @@ log("Steel material applied to armor")
 
 step("Studio lighting")
 
-# Luz principal (key light)
 bpy.ops.object.light_add(type='AREA', location=(2.5, -2.5, 3.5))
-key_light = bpy.context.active_object
-key_light.name = "KeyLight"
-key_light.data.energy = 800
-key_light.data.size = 2.0
-key_light.rotation_euler = (math.radians(50), 0, math.radians(45))
+key = bpy.context.active_object
+key.name = "KeyLight"; key.data.energy = 800; key.data.size = 2.0
 
-# Luz de preenchimento (fill light)
 bpy.ops.object.light_add(type='AREA', location=(-2.0, -1.5, 2.0))
-fill_light = bpy.context.active_object
-fill_light.name = "FillLight"
-fill_light.data.energy = 300
-fill_light.data.size = 3.0
-fill_light.rotation_euler = (math.radians(40), 0, math.radians(-45))
+fill = bpy.context.active_object
+fill.name = "FillLight"; fill.data.energy = 300; fill.data.size = 3.0
 
-# Luz de contorno (rim light)
 bpy.ops.object.light_add(type='SPOT', location=(0, 3.0, 2.5))
-rim_light = bpy.context.active_object
-rim_light.name = "RimLight"
-rim_light.data.energy = 500
-rim_light.data.spot_size = math.radians(45)
-rim_light.rotation_euler = (math.radians(-45), 0, 0)
+rim = bpy.context.active_object
+rim.name = "RimLight"; rim.data.energy = 500
+rim.data.spot_size = math.radians(45)
 
-log("Studio lights added (key + fill + rim)")
+log("Key + fill + rim lights added")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9. Câmara de apresentação
+# 9. Câmara
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Camera setup")
 
-bpy.ops.object.camera_add(location=(0, -4.0, 1.0))
+bpy.ops.object.camera_add(location=(0, -4.0, 0.9))
 camera = bpy.context.active_object
 camera.name = "PresentationCamera"
 camera.rotation_euler = (math.radians(90), 0, 0)
-scene.camera = camera
-
-# Ajustar câmara para enquadrar o personagem
 camera.data.lens = 50
-camera.data.clip_start = 0.1
-camera.data.clip_end = 100.0
-log("Camera configured (50mm, full body shot)")
+scene.camera = camera
+log("Camera ready")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10. Configuração de render para preview PNG
+# 10. Preview PNG (WORKBENCH — sem GPU, funciona headless)
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Render preview")
 
-scene.render.engine = 'BLENDER_EEVEE_NEXT'
-scene.render.resolution_x = 1024
-scene.render.resolution_y = 1024
+# WORKBENCH é o único motor garantido headless sem GPU no runner do GitHub
+scene.render.engine             = 'BLENDER_WORKBENCH'
+scene.render.resolution_x       = 1024
+scene.render.resolution_y       = 1024
 scene.render.resolution_percentage = 100
 preview_path = os.path.join(OUTPUT_DIR, "character_preview.png")
-scene.render.filepath = preview_path
+scene.render.filepath           = preview_path
 scene.render.image_settings.file_format = 'PNG'
+
+# Workbench: iluminação por Studio
+scene.display.shading.light     = 'STUDIO'
+scene.display.shading.color_type = 'MATERIAL'
 
 try:
     bpy.ops.render.render(write_still=True)
-    log(f"Preview rendered: {preview_path}")
-    report["output_files"].append("character_preview.png")
+    if os.path.exists(preview_path):
+        log(f"Preview rendered: {preview_path}")
+        report["output_files"].append("character_preview.png")
+    else:
+        log("Preview file not found after render", "WARN")
 except Exception as e:
-    log(f"Render failed (non-critical): {e}", "WARN")
+    log(f"Preview render failed (non-critical): {e}", "WARN")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 11. Guardar ficheiro .blend
+# 11. Guardar .blend
 # ─────────────────────────────────────────────────────────────────────────────
 
-step("Save .blend file")
+step("Save .blend")
 
 blend_path = os.path.join(OUTPUT_DIR, "character.blend")
-bpy.ops.wm.save_as_mainfile(filepath=blend_path)
-log(f"Blend saved: {blend_path}")
-report["output_files"].append("character.blend")
+try:
+    bpy.ops.wm.save_as_mainfile(filepath=blend_path)
+    log(f"Blend saved: {blend_path}")
+    report["output_files"].append("character.blend")
+except Exception as e:
+    log(f"Blend save failed: {e}", "WARN")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 12. Exportar GLB
+#
+#  Parâmetros válidos no Blender 4.2 LTS:
+#  - export_colors foi REMOVIDO na 4.1+ (substituído por export_attributes)
+#  - export_texcoords, export_normals, export_apply, export_skins: OK
+#  - export_def_bones: OK no 4.2
+#  - export_attributes: exporta color attributes se existirem
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Export GLB")
 
 glb_path = os.path.join(OUTPUT_DIR, "character.glb")
 
-bpy.ops.export_scene.gltf(
-    filepath=glb_path,
-    export_format='GLB',
-    export_apply=True,
-    export_materials='EXPORT',
-    export_texcoords=True,
-    export_normals=True,
-    export_colors=True,
-    export_animations=True,
-    export_skins=True,
-    export_all_influences=False,
-    export_def_bones=True,
-)
+try:
+    bpy.ops.export_scene.gltf(
+        filepath=glb_path,
+        export_format='GLB',
+        export_apply=True,
+        export_materials='EXPORT',
+        export_texcoords=True,
+        export_normals=True,
+        export_animations=True,
+        export_skins=True,
+        export_all_influences=False,
+        export_def_bones=True,
+        export_attributes=True,     # substitui export_colors no Blender 4.2+
+        export_yup=True,
+    )
+except Exception as e:
+    log(f"GLB export with full params failed: {e}", "WARN")
+    log("Retrying with minimal params...", "WARN")
+    try:
+        bpy.ops.export_scene.gltf(
+            filepath=glb_path,
+            export_format='GLB',
+            export_apply=True,
+        )
+    except Exception as e2:
+        log(f"GLB export minimal also failed: {e2}", "ERROR")
+        sys.exit(1)
 
 if os.path.exists(glb_path):
     size_mb = os.path.getsize(glb_path) / (1024 * 1024)
     log(f"GLB exported: {glb_path} ({size_mb:.2f} MB)")
     report["output_files"].append("character.glb")
 else:
-    log("GLB export failed — file not found", "ERROR")
+    log("GLB file not found after export", "ERROR")
     sys.exit(1)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -495,34 +450,34 @@ else:
 
 step("Write report")
 
-report["end_time"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-report["success"] = len(report["errors"]) == 0
+report["end_time"]        = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+report["success"]         = len(report["errors"]) == 0
 report["blender_version"] = bpy.app.version_string
-report["mpfb2_used"] = use_mpfb
-report["character_type"] = "medieval_warrior"
-report["armor_pieces"] = len(armor_objects)
+report["mpfb2_used"]      = use_mpfb
+report["character_type"]  = "medieval_warrior"
+report["armor_pieces"]    = len(armor_objects)
 
 report_path = os.path.join(OUTPUT_DIR, "character_report.json")
 with open(report_path, "w") as f:
     json.dump(report, f, indent=2, ensure_ascii=False)
-log(f"Report written: {report_path}")
+log(f"Report: {report_path}")
 report["output_files"].append("character_report.json")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sumário final
+# Sumário
 # ─────────────────────────────────────────────────────────────────────────────
 
 print("\n" + "="*60)
-print("MEDIEVAL CHARACTER GENERATION COMPLETE")
+print("MEDIEVAL CHARACTER — COMPLETE")
 print("="*60)
 for f in report["output_files"]:
     full = os.path.join(OUTPUT_DIR, f)
     size = os.path.getsize(full) if os.path.exists(full) else 0
-    print(f"  {f:40s} {size/1024:.1f} KB")
-print(f"\nSteps:   {len(report['steps'])}")
-print(f"Errors:  {len(report['errors'])}")
-print(f"Warnings:{len(report['warnings'])}")
-print(f"MPFB2:   {'yes' if use_mpfb else 'no (parametric fallback)'}")
+    print(f"  {f:40s}  {size/1024:.1f} KB")
+print(f"\nSteps:    {len(report['steps'])}")
+print(f"Errors:   {len(report['errors'])}")
+print(f"Warnings: {len(report['warnings'])}")
+print(f"MPFB2:    {'yes' if use_mpfb else 'no (parametric fallback)'}")
 if report["errors"]:
     print("\nERRORS:")
     for e in report["errors"]:
