@@ -70,18 +70,32 @@ jobs:
         env:
           BLENDER_USER_EXTENSIONS: "${{ github.workspace }}/blender-4.2.9-linux-x64/4.2/extensions"
 
+      # ── 6b. DEBUG — listar tudo o que está em output/ ────────────────────
+      - name: Debug output directory
+        run: |
+          echo "=== Contents of output/ ==="
+          ls -lah output/ || echo "(directory empty or missing)"
+          echo "=== PWD ==="
+          pwd
+          echo "=== GITHUB_WORKSPACE ==="
+          echo "${{ github.workspace }}"
+          echo "=== Full search for .glb ==="
+          find . -name "*.glb" 2>/dev/null || echo "(no .glb found)"
+          echo "=== Full search for character_report.json ==="
+          find . -name "character_report.json" -exec cat {} \; 2>/dev/null || echo "(no report found)"
+
       # ── 7. Validar GLB com gltf_validator ────────────────────────────────
       - name: Validate GLB
         run: |
-          if [ -f output/character.glb ]; then
-            # --output escreve o report JSON; --messages imprime issues no stderr
-            gltf_validator output/character.glb \
+          GLB="output/character.glb"
+          if [ -f "$GLB" ]; then
+            gltf_validator "$GLB" \
               --output output/character_validation.json \
               --messages \
               --all
             echo "Validation complete."
           else
-            echo "ERROR: character.glb not found. Pipeline failed."
+            echo "ERROR: $GLB not found after generation step."
             exit 1
           fi
 
