@@ -24,14 +24,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libegl1 libgl1 libxi6 libxxf86vm1 \
             libxfixes3 libxrender1 libxkbcommon0 libsm6 \
-            wget xz-utils
+            curl xz-utils
 
-      # ── 2. Descarregar e instalar Blender 4.2.3 LTS ──────────────────────
-      - name: Download Blender 4.2.3 LTS
+      # ── 2. Descarregar e instalar Blender 4.2.9 LTS ──────────────────────
+      - name: Download Blender 4.2.9 LTS
         run: |
-          wget -q https://download.blender.org/release/Blender4.2/blender-4.2.3-linux-x64.tar.xz
-          tar -xf blender-4.2.3-linux-x64.tar.xz
-          echo "${{ github.workspace }}/blender-4.2.3-linux-x64" >> $GITHUB_PATH
+          curl -L -o blender.tar.xz \
+            "https://download.blender.org/release/Blender4.2/blender-4.2.9-linux-x64.tar.xz"
+          tar -xf blender.tar.xz
+          echo "${{ github.workspace }}/blender-4.2.9-linux-x64" >> $GITHUB_PATH
 
       - name: Verify Blender
         run: blender --version
@@ -50,8 +51,9 @@ jobs:
       - name: Install gltf_validator binary
         run: |
           GLTF_VERSION="2.0.0-dev.3.8"
-          wget -q "https://github.com/KhronosGroup/glTF-Validator/releases/download/${GLTF_VERSION}/gltf_validator-${GLTF_VERSION}-linux64.tar.xz"
-          tar -xf "gltf_validator-${GLTF_VERSION}-linux64.tar.xz"
+          curl -L -o gltf_validator.tar.xz \
+            "https://github.com/KhronosGroup/glTF-Validator/releases/download/${GLTF_VERSION}/gltf_validator-${GLTF_VERSION}-linux64.tar.xz"
+          tar -xf gltf_validator.tar.xz
           sudo mv gltf_validator /usr/local/bin/gltf_validator
           sudo chmod +x /usr/local/bin/gltf_validator
           which gltf_validator
@@ -66,7 +68,7 @@ jobs:
           blender -b --python scripts/generate_character.py -- \
             --output "${{ github.workspace }}/output"
         env:
-          BLENDER_USER_EXTENSIONS: "${{ github.workspace }}/blender-4.2.3-linux-x64/4.2/extensions"
+          BLENDER_USER_EXTENSIONS: "${{ github.workspace }}/blender-4.2.9-linux-x64/4.2/extensions"
 
       # ── 7. Validar GLB com gltf_validator ────────────────────────────────
       - name: Validate GLB
