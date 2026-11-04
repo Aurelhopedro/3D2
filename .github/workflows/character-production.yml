@@ -1,0 +1,89 @@
+name: Character Production
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/character-production.yml'
+
+jobs:
+  generate-character:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 1. Instalar dependências headless do Blender ──────────────────────
+      - name: Install Blender headless system libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxi6 libxxf86vm1 \
+            libxfixes3 libxrender1 libxkbcommon0 libsm6 \
+            wget xz-utils nodejs npm
+
+      # ── 2. Descarregar e instalar Blender 4.2.3 LTS ──────────────────────
+      - name: Download Blender 4.2.3 LTS
+        run: |
+          wget -q https://download.blender.org/release/Blender4.2/blender-4.2.3-linux-x64.tar.xz
+          tar -xf blender-4.2.3-linux-x64.tar.xz
+          echo "${{ github.workspace }}/blender-4.2.3-linux-x64" >> $GITHUB_PATH
+
+      - name: Verify Blender
+        run: blender --version
+
+      # ── 3. Instalar MPFB2 como extensão Blender ──────────────────────────
+      - name: Clone and install MPFB2
+        run: |
+          git clone --depth 1 https://github.com/makehumancommunity/mpfb2.git
+          cd mpfb2/src
+          zip -r ../../mpfb.zip mpfb
+          cd ../..
+          blender -b --command extension install-file -r user_default -e mpfb.zip
+          echo "MPFB2 installed."
+
+      # ── 4. Instalar glTF Validator ────────────────────────────────────────
+      - name: Install gltf-validator
+        run: npm install -g gltf-validator
+
+      # ── 5. Criar pasta de saída ───────────────────────────────────────────
+      - name: Create output directory
+        run: mkdir -p output
+
+      # ── 6. Executar script Python de geração do personagem ───────────────
+      - name: Generate medieval character
+        run: |
+          blender -b --python scripts/generate_character.py -- \
+            --output "${{ github.workspace }}/output"
+        env:
+          BLENDER_USER_EXTENSIONS: "${{ github.workspace }}/blender-4.2.3-linux-x64/4.2/extensions"
+
+      # ── 7. Validar GLB com glTF Validator ────────────────────────────────
+      - name: Validate GLB
+        run: |
+          if [ -f output/character.glb ]; then
+            gltf-validator output/character.glb \
+              --stdout \
+              --output output/character_validation.json
+            echo "Validation complete."
+          else
+            echo "ERROR: character.glb not found. Pipeline failed."
+            exit 1
+          fi
+
+      # ── 8. Listar ficheiros gerados ───────────────────────────────────────
+      - name: List generated files
+        run: ls -lh output/
+
+      # ── 9. Publicar artifacts para download ──────────────────────────────
+      - name: Upload character artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: medieval-character
+          path: output/
+          retention-days: 30
+          if-no-files-found: error
