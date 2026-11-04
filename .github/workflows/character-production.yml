@@ -24,7 +24,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libegl1 libgl1 libxi6 libxxf86vm1 \
             libxfixes3 libxrender1 libxkbcommon0 libsm6 \
-            wget xz-utils nodejs npm
+            wget xz-utils
 
       # ── 2. Descarregar e instalar Blender 4.2.3 LTS ──────────────────────
       - name: Download Blender 4.2.3 LTS
@@ -46,9 +46,15 @@ jobs:
           blender -b --command extension install-file -r user_default -e mpfb.zip
           echo "MPFB2 installed."
 
-      # ── 4. Instalar glTF Validator ────────────────────────────────────────
-      - name: Install gltf-validator
-        run: npm install -g gltf-validator
+      # ── 4. Instalar gltf_validator binário nativo (KhronosGroup) ─────────
+      - name: Install gltf_validator binary
+        run: |
+          GLTF_VERSION="2.0.0-dev.3.8"
+          wget -q "https://github.com/KhronosGroup/glTF-Validator/releases/download/${GLTF_VERSION}/gltf_validator-${GLTF_VERSION}-linux64.tar.xz"
+          tar -xf "gltf_validator-${GLTF_VERSION}-linux64.tar.xz"
+          sudo mv gltf_validator /usr/local/bin/gltf_validator
+          sudo chmod +x /usr/local/bin/gltf_validator
+          gltf_validator --version
 
       # ── 5. Criar pasta de saída ───────────────────────────────────────────
       - name: Create output directory
@@ -62,11 +68,11 @@ jobs:
         env:
           BLENDER_USER_EXTENSIONS: "${{ github.workspace }}/blender-4.2.3-linux-x64/4.2/extensions"
 
-      # ── 7. Validar GLB com glTF Validator ────────────────────────────────
+      # ── 7. Validar GLB com gltf_validator ────────────────────────────────
       - name: Validate GLB
         run: |
           if [ -f output/character.glb ]; then
-            gltf-validator output/character.glb \
+            gltf_validator output/character.glb \
               --stdout \
               --output output/character_validation.json
             echo "Validation complete."
