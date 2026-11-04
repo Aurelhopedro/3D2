@@ -74,9 +74,11 @@ jobs:
       - name: Validate GLB
         run: |
           if [ -f output/character.glb ]; then
+            # --output escreve o report JSON; --messages imprime issues no stderr
             gltf_validator output/character.glb \
-              --stdout \
-              --output output/character_validation.json
+              --output output/character_validation.json \
+              --messages \
+              --all
             echo "Validation complete."
           else
             echo "ERROR: character.glb not found. Pipeline failed."
