@@ -1,4 +1,4 @@
-name: Medieval Character v2 — mhcore + Blender 4.2
+name: Character Production — MPFB2 + Blender 4.2 LTS
 
 on:
   workflow_dispatch:
@@ -11,153 +11,171 @@ on:
 jobs:
   generate-character:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 1. DEPENDÊNCIAS SISTEMA PARA BLENDER HEADLESS ─────────────────────
-      - name: Instalar libs headless do Blender
+      # ── 1. DEPENDÊNCIAS SISTEMA ──────────────────────────────────────────
+      - name: Instalar dependências headless
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libegl1 libgl1 libxi6 libxxf86vm1 \
             libxfixes3 libxrender1 libxkbcommon0 libsm6 \
-            curl xz-utils python3-pip
+            curl xz-utils unzip python3-pip git
 
-      # ── 2. BLENDER 4.2.9 LTS ──────────────────────────────────────────────
+      # ── 2. BLENDER 4.2.9 LTS ────────────────────────────────────────────
+      - name: Cache Blender
+        id: cache-blender
+        uses: actions/cache@v4
+        with:
+          path: blender-4.2.9-linux-x64
+          key: blender-4.2.9-linux-x64
+
       - name: Descarregar Blender 4.2.9 LTS
+        if: steps.cache-blender.outputs.cache-hit != 'true'
         run: |
           curl -L -o blender.tar.xz \
             "https://download.blender.org/release/Blender4.2/blender-4.2.9-linux-x64.tar.xz"
           tar -xf blender.tar.xz
-          echo "${{ github.workspace }}/blender-4.2.9-linux-x64" >> $GITHUB_PATH
+          rm blender.tar.xz
+
+      - name: Adicionar Blender ao PATH
+        run: echo "${{ github.workspace }}/blender-4.2.9-linux-x64" >> $GITHUB_PATH
 
       - name: Verificar Blender
         run: blender --version
 
-      # ── 3. INSTALAR mhcore (MakeHuman headless, sem Qt/OpenGL) ───────────
-      - name: Instalar mhcore
+      # ── 3. MPFB2 — clonar repositório oficial ───────────────────────────
+      - name: Cache MPFB2
+        id: cache-mpfb2
+        uses: actions/cache@v4
+        with:
+          path: mpfb2
+          key: mpfb2-commit-${{ hashFiles('mpfb2/.git/HEAD') }}-v1
+          restore-keys: mpfb2-
+
+      - name: Clonar MPFB2
+        if: steps.cache-mpfb2.outputs.cache-hit != 'true'
         run: |
-          pip install --quiet makehuman-mcp
-          python3 -c "
-          import mhcore
-          print('mhcore instalado OK')
-          " || { echo 'AVISO: mhcore não instalou — será usado fallback programático'; }
+          git clone --depth 1 \
+            https://github.com/makehumancommunity/mpfb2.git mpfb2
+          echo "MPFB2 commit: $(git -C mpfb2 rev-parse --short HEAD)"
 
-      # ── 4. GERAR MESH HUMANO REALISTA COM MHCORE (sem Blender, sem GUI) ───
-      - name: Gerar mesh humano com mhcore
+      - name: Empacotar MPFB2 como extensão Blender
         run: |
-          mkdir -p output
-          python3 - <<'PYEOF'
-          import os, sys, json
-          from pathlib import Path
+          cd mpfb2/src
+          zip -r ../../mpfb2.zip mpfb
+          echo "ZIP: $(du -sh ../../mpfb2.zip | cut -f1)"
 
-          out = Path("output")
-          out.mkdir(parents=True, exist_ok=True)
-
-          try:
-              import mhcore
-              print("== mhcore: a criar personagem feminina medieval ==")
-              h = mhcore.new_human()
-
-              # Configuração feminina jovem adulta
-              h.set_gender(1.0)   # feminino
-              h.set_age(0.35)     # jovem adulta ~25 anos
-              h.set_weight(0.45)  # peso normal
-              h.set_muscle(0.40)
-              h.set_height(0.65)
-
-              # Morfologias faciais e corporais
-              mods = set(h.list_modifiers())
-              targets = [
-                  ("head/head-oval",          0.30),
-                  ("head/head-height",         0.20),
-                  ("eyes/eyes-size",           0.25),
-                  ("eyes/eyes-distance",      -0.10),
-                  ("nose/nose-width",         -0.20),
-                  ("mouth/mouth-width",       -0.10),
-                  ("breast/breast-size",       0.50),
-                  ("pelvis/pelvis-size",       0.30),
-                  ("hip/hip-waist",           -0.20),
-              ]
-              for mod, val in targets:
-                  if mod in mods:
-                      try:
-                          h.apply_modifier(mod, val)
-                          print(f"  OK: {mod} = {val}")
-                      except Exception as e:
-                          print(f"  skip: {mod}: {e}")
-
-              # Olhos
-              try:
-                  eyes = h.list_available("eyes")
-                  if eyes: h.equip_eyes(eyes[0])
-              except: pass
-
-              # Exportar OBJ
-              obj_path = out / "female_mhcore.obj"
-              h.export(str(obj_path))
-
-              if obj_path.exists():
-                  kb = obj_path.stat().st_size // 1024
-                  print(f"== OBJ gerado: {kb} KB ==")
-                  with open(out / "mhcore_meta.json", "w") as f:
-                      json.dump({"status": "ok", "obj_kb": kb}, f)
-              else:
-                  raise RuntimeError("OBJ não foi criado")
-
-          except Exception as e:
-              print(f"AVISO mhcore: {e}")
-              print("Blender usará mesh programático (fallback)")
-              with open(out / "mhcore_meta.json", "w") as f:
-                  json.dump({"status": "fallback", "reason": str(e)}, f)
-          PYEOF
-
-      # ── 5. DEFINIR VARIÁVEL DO OBJ ────────────────────────────────────────
-      - name: Definir caminho do OBJ
+      - name: Instalar MPFB2 no Blender
         run: |
-          OBJ="output/female_mhcore.obj"
-          if [ -f "$OBJ" ] && [ -s "$OBJ" ]; then
-            echo "MHCORE_OBJ=$GITHUB_WORKSPACE/$OBJ" >> "$GITHUB_ENV"
-            echo "OBJ encontrado: $(du -sh $OBJ | cut -f1)"
+          blender -b \
+            --command extension install-file \
+            -r user_default \
+            -e "${{ github.workspace }}/mpfb2.zip"
+          echo "MPFB2 instalado"
+
+      # ── 4. MAKEHUMAN SYSTEM ASSETS (pele, olhos, dentes, cabelo) ────────
+      - name: Cache MakeHuman system assets
+        id: cache-mh-assets
+        uses: actions/cache@v4
+        with:
+          path: mh_assets
+          key: mh-system-assets-v3
+
+      - name: Descarregar MakeHuman system assets
+        if: steps.cache-mh-assets.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p mh_assets
+          BASE="http://download.tuxfamily.org/makehuman/assets"
+
+          # System assets — pacote principal com pele, olhos, dentes, cabelo
+          curl -L -o mh_assets/makehuman-system-assets.zip \
+            "${BASE}/makehuman-system-assets.zip" 2>/dev/null || \
+          curl -L -o mh_assets/makehuman-system-assets.zip \
+            "https://github.com/makehumancommunity/makehuman-assets/releases/download/v1.0.0/makehuman-system-assets.zip" 2>/dev/null || \
+          echo "AVISO: system assets não descarregados — tentativa via MPFB2"
+
+          ls -lh mh_assets/ 2>/dev/null || true
+
+      - name: Instalar system assets no MPFB2
+        run: |
+          # Localizar diretório de extensões do Blender 4.2
+          BLENDER_EXT=$(blender -b --python-expr "
+          import bpy, pathlib
+          print(str(pathlib.Path(bpy.utils.user_resource('EXTENSIONS'))))
+          " 2>/dev/null | tail -1)
+
+          echo "Extensions dir: $BLENDER_EXT"
+
+          MPFB_DIR="${BLENDER_EXT}/user_default/mpfb"
+          ASSET_DIR="${MPFB_DIR}/data/packs"
+
+          if [ -d "$MPFB_DIR" ]; then
+            mkdir -p "$ASSET_DIR"
+            for f in mh_assets/*.zip; do
+              [ -f "$f" ] || continue
+              echo "Instalar: $f"
+              blender -b --python-expr "
+          import bpy
+          bpy.ops.preferences.addon_enable(module='mpfb')
+          " 2>/dev/null || true
+              cp "$f" "$ASSET_DIR/" 2>/dev/null || true
+            done
+            echo "Assets copiados"
           else
-            echo "MHCORE_OBJ=" >> "$GITHUB_ENV"
-            echo "OBJ não disponível — Blender usará fallback programático"
+            echo "AVISO: diretório MPFB2 não encontrado em $MPFB_DIR"
           fi
 
-      # ── 6. BLENDER: IMPORTAR + MATERIAIS PBR + ARMADURA + RENDER ─────────
-      - name: Gerar personagem medieval com Blender
+      # ── 5. INSTALAR pygltflib (validador) ───────────────────────────────
+      - name: Instalar pygltflib
+        run: pip install --quiet pygltflib
+
+      # ── 6. GERAR PERSONAGEM COM MPFB2 + BLENDER ─────────────────────────
+      - name: Criar diretório de saída
+        run: mkdir -p output
+
+      - name: Gerar personagem com MPFB2
         env:
-          MHCORE_OBJ:    ${{ env.MHCORE_OBJ }}
-          MHCORE_OUTPUT: ${{ github.workspace }}/output
+          OUTPUT_DIR: ${{ github.workspace }}/output
+          MPFB2_DIR:  ${{ github.workspace }}/mpfb2
+          MH_ASSETS:  ${{ github.workspace }}/mh_assets
         run: |
           blender -b \
             --python scripts/generate_character.py \
-            -- --output "${{ github.workspace }}/output"
+            -- \
+            --output "${{ github.workspace }}/output" \
+            --assets "${{ github.workspace }}/mh_assets"
 
-      # ── 7. VERIFICAR RESULTADOS ───────────────────────────────────────────
+      # ── 7. VERIFICAR RESULTADOS ──────────────────────────────────────────
       - name: Verificar resultados
         if: always()
         run: |
           echo "=== Ficheiros em output/ ==="
           ls -lh output/ 2>/dev/null || echo "(vazio)"
           echo ""
-          echo "=== Relatório ==="
-          python3 -c "
-          import json
+          if [ -f output/character_report.json ]; then
+            echo "=== Relatório ==="
+            python3 -c "
+          import json, sys
           r = json.load(open('output/character_report.json'))
-          print('Status  :', 'OK' if r.get('success') else 'FALHOU')
-          print('Blender :', r.get('blender_version'))
-          print('Fonte   :', r.get('body_source'))
-          print('Ficheiros:', r.get('output_files'))
-          if r.get('errors'): print('Erros:', r['errors'])
+          print('Status     :', 'OK' if r.get('success') else 'FALHOU')
+          print('Blender    :', r.get('blender_version','?'))
+          print('Fonte      :', r.get('body_source','?'))
+          print('Gerador    :', r.get('generator','?'))
+          print('Vértices   :', r.get('vertices','?'))
+          print('Materiais  :', r.get('materials','?'))
+          print('Ficheiros  :', r.get('output_files',[]))
+          if r.get('errors'):   print('Erros:', r['errors'])
           if r.get('warnings'): print('Avisos:', r['warnings'])
-          " 2>/dev/null || cat output/character_report.json 2>/dev/null || echo "(sem relatório)"
+          " 2>/dev/null || cat output/character_report.json
+          fi
 
-      # ── 8. VALIDAR GLB ────────────────────────────────────────────────────
-      - name: Instalar e validar GLB
+      # ── 8. VALIDAR GLB ───────────────────────────────────────────────────
+      - name: Validar GLB com pygltflib
         run: |
           GLB="output/character.glb"
           if [ ! -f "$GLB" ]; then
@@ -165,27 +183,29 @@ jobs:
             exit 1
           fi
           echo "GLB encontrado: $(du -sh $GLB | cut -f1)"
-          # Tentar instalar validator (não crítico)
-          GLTF_VERSION="2.0.0-dev.3.8"
-          curl -sL -o gltf_validator.tar.xz \
-            "https://github.com/KhronosGroup/glTF-Validator/releases/download/${GLTF_VERSION}/gltf_validator-${GLTF_VERSION}-linux64.tar.xz" \
-            2>/dev/null && \
-          tar -xf gltf_validator.tar.xz 2>/dev/null && \
-          chmod +x gltf_validator && \
-          (./gltf_validator "$GLB" --all && echo "GLB válido") \
-          || echo "Validação GLB não disponível (não crítico)"
+          python3 - <<'PYEOF'
+          from pygltflib import GLTF2
+          import sys
 
-      # ── 9. PUBLICAR ARTEFACTOS ────────────────────────────────────────────
+          glb = GLTF2().load("output/character.glb")
+          print(f"Meshes      : {len(glb.meshes)}")
+          print(f"Materials   : {len(glb.materials)}")
+          print(f"Textures    : {len(glb.textures)}")
+          print(f"Nodes       : {len(glb.nodes)}")
+          print(f"Skins       : {len(glb.skins)}")
+          print(f"Animations  : {len(glb.animations)}")
+          print("GLB VÁLIDO")
+          PYEOF
+
+      # ── 9. PUBLICAR ARTEFACTOS ───────────────────────────────────────────
       - name: Upload artefactos
         uses: actions/upload-artifact@v4
         with:
-          name: medieval-character-v2
+          name: character-mpfb2-v1
           path: |
             output/character_preview.png
             output/character.blend
             output/character.glb
             output/character_report.json
-            output/mhcore_meta.json
-            output/female_mhcore.obj
           if-no-files-found: warn
           retention-days: 30
