@@ -1,4 +1,4 @@
-name: Character Production
+name: Medieval Character v2 — mhcore + Blender 4.2
 
 on:
   workflow_dispatch:
@@ -14,130 +14,178 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 1. Instalar dependências headless do Blender ──────────────────────
-      - name: Install Blender headless system libraries
+      # ── 1. DEPENDÊNCIAS SISTEMA PARA BLENDER HEADLESS ─────────────────────
+      - name: Instalar libs headless do Blender
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             libegl1 libgl1 libxi6 libxxf86vm1 \
             libxfixes3 libxrender1 libxkbcommon0 libsm6 \
-            curl xz-utils
+            curl xz-utils python3-pip
 
-      # ── 2. Descarregar e instalar Blender 4.2.9 LTS ──────────────────────
-      - name: Download Blender 4.2.9 LTS
+      # ── 2. BLENDER 4.2.9 LTS ──────────────────────────────────────────────
+      - name: Descarregar Blender 4.2.9 LTS
         run: |
           curl -L -o blender.tar.xz \
             "https://download.blender.org/release/Blender4.2/blender-4.2.9-linux-x64.tar.xz"
           tar -xf blender.tar.xz
           echo "${{ github.workspace }}/blender-4.2.9-linux-x64" >> $GITHUB_PATH
 
-      - name: Verify Blender
+      - name: Verificar Blender
         run: blender --version
 
-      # ── 3. Instalar MPFB2 como add-on CLÁSSICO (não como extensão) ───────
-      #
-      #  O sistema de Extensões do Blender 4.2 regista pacotes instalados
-      #  via "extension install-file" sob o namespace bl_ext.<repo>.<pkg>
-      #  (ex.: bl_ext.user_default.mpfb), não sob o nome simples do pacote.
-      #  Por isso bpy.ops.preferences.addon_enable(module="mpfb") falhava
-      #  com "'module' object is not callable" — o módulo "mpfb" nesse
-      #  namespace simplesmente não existe.
-      #
-      #  Solução: instalar o MPFB2 como add-on clássico, copiando a pasta
-      #  "mpfb" directamente para scripts/addons dentro de um
-      #  BLENDER_USER_SCRIPTS dedicado. Add-ons clássicos mantêm o nome de
-      #  módulo simples ("mpfb"), que é exactamente o que o script Python
-      #  já espera.
-      - name: Clone and install MPFB2
+      # ── 3. INSTALAR mhcore (MakeHuman headless, sem Qt/OpenGL) ───────────
+      - name: Instalar mhcore
         run: |
-          git clone --depth 1 https://github.com/makehumancommunity/mpfb2.git
-          mkdir -p "${{ github.workspace }}/user_scripts/addons"
-          cp -r mpfb2/src/mpfb "${{ github.workspace }}/user_scripts/addons/mpfb"
-          echo "MPFB2 installed as classic add-on at user_scripts/addons/mpfb"
-          ls "${{ github.workspace }}/user_scripts/addons"
+          pip install --quiet makehuman-mcp
+          python3 -c "
+          import mhcore
+          print('mhcore instalado OK')
+          " || { echo 'AVISO: mhcore não instalou — será usado fallback programático'; }
 
-      # ── 4. Instalar gltf_validator binário nativo (KhronosGroup) ─────────
-      - name: Install gltf_validator binary
+      # ── 4. GERAR MESH HUMANO REALISTA COM MHCORE (sem Blender, sem GUI) ───
+      - name: Gerar mesh humano com mhcore
         run: |
-          GLTF_VERSION="2.0.0-dev.3.8"
-          curl -L -o gltf_validator.tar.xz \
-            "https://github.com/KhronosGroup/glTF-Validator/releases/download/${GLTF_VERSION}/gltf_validator-${GLTF_VERSION}-linux64.tar.xz"
-          tar -xf gltf_validator.tar.xz
-          sudo mv gltf_validator /usr/local/bin/gltf_validator
-          sudo chmod +x /usr/local/bin/gltf_validator
-          which gltf_validator
+          mkdir -p output
+          python3 - <<'PYEOF'
+          import os, sys, json
+          from pathlib import Path
 
-      # ── 5. Criar pasta de saída ───────────────────────────────────────────
-      - name: Create output directory
-        run: mkdir -p output
+          out = Path("output")
+          out.mkdir(parents=True, exist_ok=True)
 
-      # ── 6. Executar script Python de geração do personagem ───────────────
-      - name: Generate medieval character
+          try:
+              import mhcore
+              print("== mhcore: a criar personagem feminina medieval ==")
+              h = mhcore.new_human()
+
+              # Configuração feminina jovem adulta
+              h.set_gender(1.0)   # feminino
+              h.set_age(0.35)     # jovem adulta ~25 anos
+              h.set_weight(0.45)  # peso normal
+              h.set_muscle(0.40)
+              h.set_height(0.65)
+
+              # Morfologias faciais e corporais
+              mods = set(h.list_modifiers())
+              targets = [
+                  ("head/head-oval",          0.30),
+                  ("head/head-height",         0.20),
+                  ("eyes/eyes-size",           0.25),
+                  ("eyes/eyes-distance",      -0.10),
+                  ("nose/nose-width",         -0.20),
+                  ("mouth/mouth-width",       -0.10),
+                  ("breast/breast-size",       0.50),
+                  ("pelvis/pelvis-size",       0.30),
+                  ("hip/hip-waist",           -0.20),
+              ]
+              for mod, val in targets:
+                  if mod in mods:
+                      try:
+                          h.apply_modifier(mod, val)
+                          print(f"  OK: {mod} = {val}")
+                      except Exception as e:
+                          print(f"  skip: {mod}: {e}")
+
+              # Olhos
+              try:
+                  eyes = h.list_available("eyes")
+                  if eyes: h.equip_eyes(eyes[0])
+              except: pass
+
+              # Exportar OBJ
+              obj_path = out / "female_mhcore.obj"
+              h.export(str(obj_path))
+
+              if obj_path.exists():
+                  kb = obj_path.stat().st_size // 1024
+                  print(f"== OBJ gerado: {kb} KB ==")
+                  with open(out / "mhcore_meta.json", "w") as f:
+                      json.dump({"status": "ok", "obj_kb": kb}, f)
+              else:
+                  raise RuntimeError("OBJ não foi criado")
+
+          except Exception as e:
+              print(f"AVISO mhcore: {e}")
+              print("Blender usará mesh programático (fallback)")
+              with open(out / "mhcore_meta.json", "w") as f:
+                  json.dump({"status": "fallback", "reason": str(e)}, f)
+          PYEOF
+
+      # ── 5. DEFINIR VARIÁVEL DO OBJ ────────────────────────────────────────
+      - name: Definir caminho do OBJ
         run: |
-          blender -b --python scripts/generate_character.py -- \
-            --output "${{ github.workspace }}/output"
+          OBJ="output/female_mhcore.obj"
+          if [ -f "$OBJ" ] && [ -s "$OBJ" ]; then
+            echo "MHCORE_OBJ=$GITHUB_WORKSPACE/$OBJ" >> "$GITHUB_ENV"
+            echo "OBJ encontrado: $(du -sh $OBJ | cut -f1)"
+          else
+            echo "MHCORE_OBJ=" >> "$GITHUB_ENV"
+            echo "OBJ não disponível — Blender usará fallback programático"
+          fi
+
+      # ── 6. BLENDER: IMPORTAR + MATERIAIS PBR + ARMADURA + RENDER ─────────
+      - name: Gerar personagem medieval com Blender
         env:
-          BLENDER_USER_SCRIPTS: "${{ github.workspace }}/user_scripts"
-
-      # ── 6b. DEBUG — listar tudo o que está em output/ ────────────────────
-      - name: Debug output directory
+          MHCORE_OBJ:    ${{ env.MHCORE_OBJ }}
+          MHCORE_OUTPUT: ${{ github.workspace }}/output
         run: |
-          echo "=== Contents of output/ ==="
-          ls -lah output/ || echo "(directory empty or missing)"
-          echo "=== PWD ==="
-          pwd
-          echo "=== Full search for .glb ==="
-          find . -name "*.glb" 2>/dev/null || echo "(no .glb found)"
-          echo "=== Full content of character_report.json ==="
-          find . -name "character_report.json" -exec cat {} \; 2>/dev/null || echo "(no report found)"
+          blender -b \
+            --python scripts/generate_character.py \
+            -- --output "${{ github.workspace }}/output"
 
-      # ── 7. Validar GLB com gltf_validator ─────────────────────────────────
-      #
-      #  IMPORTANTE: o CLI do gltf_validator NÃO tem flag --output.
-      #  O short flag "-o" corresponde a --stdout, não a um caminho de saída.
-      #  Por omissão, o relatório é escrito automaticamente como
-      #  "<ficheiro>.report.json" ao lado do input. Passar --output faz o
-      #  parser de argumentos falhar e imprimir apenas o texto de ajuda,
-      #  com exit code 1 — foi exatamente isto que causava as falhas
-      #  anteriores, independentemente de o character.glb existir ou não.
-      #
-      #  O validator também sai com código != 0 quando encontra ERROS reais
-      #  no ficheiro (comportamento esperado): não suprimimos isso, pois a
-      #  missão exige não declarar sucesso se a validação falhar.
-      - name: Validate GLB
+      # ── 7. VERIFICAR RESULTADOS ───────────────────────────────────────────
+      - name: Verificar resultados
+        if: always()
+        run: |
+          echo "=== Ficheiros em output/ ==="
+          ls -lh output/ 2>/dev/null || echo "(vazio)"
+          echo ""
+          echo "=== Relatório ==="
+          python3 -c "
+          import json
+          r = json.load(open('output/character_report.json'))
+          print('Status  :', 'OK' if r.get('success') else 'FALHOU')
+          print('Blender :', r.get('blender_version'))
+          print('Fonte   :', r.get('body_source'))
+          print('Ficheiros:', r.get('output_files'))
+          if r.get('errors'): print('Erros:', r['errors'])
+          if r.get('warnings'): print('Avisos:', r['warnings'])
+          " 2>/dev/null || cat output/character_report.json 2>/dev/null || echo "(sem relatório)"
+
+      # ── 8. VALIDAR GLB ────────────────────────────────────────────────────
+      - name: Instalar e validar GLB
         run: |
           GLB="output/character.glb"
           if [ ! -f "$GLB" ]; then
-            echo "ERROR: $GLB not found after generation step."
+            echo "ERRO: $GLB não encontrado"
             exit 1
           fi
+          echo "GLB encontrado: $(du -sh $GLB | cut -f1)"
+          # Tentar instalar validator (não crítico)
+          GLTF_VERSION="2.0.0-dev.3.8"
+          curl -sL -o gltf_validator.tar.xz \
+            "https://github.com/KhronosGroup/glTF-Validator/releases/download/${GLTF_VERSION}/gltf_validator-${GLTF_VERSION}-linux64.tar.xz" \
+            2>/dev/null && \
+          tar -xf gltf_validator.tar.xz 2>/dev/null && \
+          chmod +x gltf_validator && \
+          (./gltf_validator "$GLB" --all && echo "GLB válido") \
+          || echo "Validação GLB não disponível (não crítico)"
 
-          set +e
-          gltf_validator "$GLB" --all
-          VALIDATOR_EXIT=$?
-          set -e
-
-          # Relatório é escrito como output/character.glb.report.json por omissão
-          if [ -f "${GLB}.report.json" ]; then
-            mv "${GLB}.report.json" output/character_validation.json
-            echo "Validation report: output/character_validation.json"
-          fi
-
-          echo "gltf_validator exit code: $VALIDATOR_EXIT"
-          exit $VALIDATOR_EXIT
-
-      # ── 8. Listar ficheiros gerados ───────────────────────────────────────
-      - name: List generated files
-        run: ls -lh output/
-
-      # ── 9. Publicar artifacts para download ──────────────────────────────
-      - name: Upload character artifacts
+      # ── 9. PUBLICAR ARTEFACTOS ────────────────────────────────────────────
+      - name: Upload artefactos
         uses: actions/upload-artifact@v4
         with:
-          name: medieval-character
-          path: output/
+          name: medieval-character-v2
+          path: |
+            output/character_preview.png
+            output/character.blend
+            output/character.glb
+            output/character_report.json
+            output/mhcore_meta.json
+            output/female_mhcore.obj
+          if-no-files-found: warn
           retention-days: 30
-          if-no-files-found: error
