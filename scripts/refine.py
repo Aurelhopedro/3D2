@@ -19,7 +19,7 @@ personagem de aspecto profissional:
   7. Olhos anatómicos: SEMPRE removidos e recriados correctamente
      (esclera + íris + pupila + córnea)
   8. Iluminação four-point cinematográfica
-  9. Render final 1024×1024
+  9. Render final 1024x1024
  10. Exporta character_final.glb
  11. Relatório JSON de fase
 """
@@ -56,14 +56,14 @@ OUTDIR = Path(ARGS.output)
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
 report: dict = {
-    "phase":        "refine",
-    "start_time":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    "blender":      bpy.app.version_string,
-    "success":      False,
-    "steps":        [],
-    "errors":       [],
-    "warnings":     [],
-    "output_files": [],
+    "phase":           "refine",
+    "start_time":      time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "blender":         bpy.app.version_string,
+    "success":         False,
+    "steps":           [],
+    "errors":          [],
+    "warnings":        [],
+    "output_files":    [],
     "mat_assignments": [],
 }
 
@@ -110,7 +110,6 @@ def mat_pbr(
     subsurface: float = 0.0, specular: float = 0.5,
     alpha: float = 1.0,
 ) -> bpy.types.Material:
-    """Cria ou actualiza um material Principled BSDF."""
     m = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     m.use_nodes = True
     nodes = m.node_tree.nodes
@@ -175,7 +174,6 @@ def smooth_obj(obj: bpy.types.Object, angle_deg: float = 60.0) -> None:
 
 
 def assign_mat(obj: bpy.types.Object, mat: bpy.types.Material) -> None:
-    """Substitui TODOS os slots de material do objecto."""
     obj.data.materials.clear()
     obj.data.materials.append(mat)
 
@@ -183,60 +181,54 @@ def assign_mat(obj: bpy.types.Object, mat: bpy.types.Material) -> None:
 def classify_obj(obj: bpy.types.Object, body: bpy.types.Object) -> str:
     """
     Classifica um objecto para escolher o material correcto.
-    Estratégia em duas camadas:
-      1. Nome (palavras-chave explícitas)
-      2. Geometria (ratio de vértices e posição relativa ao corpo)
+    Camada 1: nome (palavras-chave).
+    Camada 2: geometria (ratio de vértices e posição relativa ao corpo).
     """
     n = obj.name.lower()
 
-    # ── Camada 1: nome ────────────────────────────────────────────────────
+    # Camada 1 — nome
     if any(k in n for k in ("eye", "iris", "cornea", "sclera", "pupil")):
         return "eye"
     if any(k in n for k in ("teeth", "tooth", "gum")):
         return "teeth"
-    if any(k in n for k in ("tongue",)):
+    if "tongue" in n:
         return "tongue"
     if any(k in n for k in ("hair", "brow", "lash", "haircard")):
         return "hair"
-    if any(k in n for k in ("nail",)):
+    if "nail" in n:
         return "nail"
     if any(k in n for k in (
         "cloth", "shirt", "top", "skirt", "pant", "belt",
         "dress", "boot", "shoe", "jacket", "coat",
         "trouser", "jeans", "sock", "glove",
-        # nomes típicos do mhcore para proxies de roupa
         "proxy", "mhclo", "clothes",
     )):
         return "cloth"
 
-    # ── Camada 2: geometria ───────────────────────────────────────────────
-    # Se não for o corpo principal e tiver entre 4% e 65% dos seus vértices,
-    # é provavelmente roupa. Verificamos também que está geometricamente
-    # contido dentro da bounding box do corpo (roupa cobre o corpo).
+    # Camada 2 — geometria
     if obj != body:
         n_body = len(body.data.vertices)
         n_obj  = len(obj.data.vertices)
         ratio  = n_obj / max(n_body, 1)
         if 0.04 < ratio < 0.65:
-            # Bounding boxes em coordenadas mundiais
-            obj_vz  = [body.matrix_world @ v.co for v in obj.data.vertices]
-            body_vz = [body.matrix_world @ v.co for v in body.data.vertices]
-            if obj_vz and body_vz:
-                obj_minz  = min(v.z for v in obj_vz)
-                obj_maxz  = max(v.z for v in obj_vz)
-                body_minz = min(v.z for v in body_vz)
-                body_maxz = max(v.z for v in body_vz)
-                body_range = body_maxz - body_minz
-                margin = body_range * 0.08
-                if (obj_minz >= body_minz - margin and
-                        obj_maxz <= body_maxz + margin):
+            try:
+                obj_coords  = [body.matrix_world @ v.co for v in obj.data.vertices]
+                body_coords = [body.matrix_world @ v.co for v in body.data.vertices]
+                obj_minz  = min(v.z for v in obj_coords)
+                obj_maxz  = max(v.z for v in obj_coords)
+                body_minz = min(v.z for v in body_coords)
+                body_maxz = max(v.z for v in body_coords)
+                margin = (body_maxz - body_minz) * 0.08
+                if obj_minz >= body_minz - margin and obj_maxz <= body_maxz + margin:
                     return "cloth"
+            except Exception:
+                pass
 
     return "skin"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. CARREGAR BLEND DA FASE 2
+# 1. CARREGAR BLEND
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Carregar blend da Fase 2")
@@ -276,22 +268,24 @@ else:
     sys.exit(1)
 
 scene = bpy.context.scene
+
+# Inventário inicial
 all_meshes = [o for o in bpy.data.objects if o.type == "MESH"]
 all_arms   = [o for o in bpy.data.objects if o.type == "ARMATURE"]
 log(f"Cena: {len(all_meshes)} meshes, {len(all_arms)} armaduras")
 
 if not all_meshes:
-    log("Nenhuma mesh encontrada após carregar ficheiro", "ERROR")
+    log("Nenhuma mesh encontrada", "ERROR")
     save_report()
     sys.exit(1)
 
 body = max(all_meshes, key=lambda o: len(o.data.vertices))
-log(f"Corpo principal: '{body.name}' ({len(body.data.vertices)} vértices)")
+log(f"Corpo: '{body.name}' ({len(body.data.vertices)} vértices)")
 
 bpy.context.view_layer.update()
-body_verts_w = [body.matrix_world @ v.co for v in body.data.vertices]
-body_minz = min(v.z for v in body_verts_w)
-body_maxz = max(v.z for v in body_verts_w)
+body_coords_w = [body.matrix_world @ v.co for v in body.data.vertices]
+body_minz = min(v.z for v in body_coords_w)
+body_maxz = max(v.z for v in body_coords_w)
 body_h    = body_maxz - body_minz
 
 head_cz    = body_minz + body_h * 0.930
@@ -326,103 +320,67 @@ log(f"Smooth aplicado a {len(all_meshes)} meshes")
 
 step("Subdivision Surface")
 SKIP_SUBDIV = ("hair", "belt", "card", "eye", "teeth", "tongue", "nail", "cornea")
-
 for obj in all_meshes:
     if any(k in obj.name.lower() for k in SKIP_SUBDIV):
         continue
     if not any(m.type == "SUBSURF" for m in obj.modifiers):
         mod = obj.modifiers.new("Subdivision", "SUBSURF")
-        mod.levels        = 1
-        mod.render_levels = 2
+        mod.levels           = 1
+        mod.render_levels    = 2
         mod.subdivision_type = "CATMULL_CLARK"
 log("Subdivision aplicada")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. PALETA DE MATERIAIS
-#    Cores e roughness escolhidos para máxima distinção visual e anti-plástico
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Criar paleta de materiais")
-
 MATS = {
-    # Pele — tom castanho médio com SSS (nem plástico nem fosco demais)
-    "skin": mat_pbr("Skin_Final",    "#B5651D",
-                    roughness=0.55, subsurface=0.22, specular=0.38),
-
-    # Rosto — ligeiramente mais quente e rosado
-    "face": mat_pbr("Face_Final",    "#C0714A",
-                    roughness=0.52, subsurface=0.28, specular=0.40),
-
-    # T-shirt — cinza antracite, muito rugoso (tecido algodão)
-    "tshirt": mat_pbr("TShirt_Final",  "#3A3A3A",
-                      roughness=0.95, specular=0.02),
-
-    # Calças — azul navy escuro, rugoso (ganga/tecido)
-    "pants": mat_pbr("Pants_Final",   "#1A2235",
-                     roughness=0.92, specular=0.03),
-
-    # Sapatos — preto fosco com brilho subtil (couro)
-    "shoes": mat_pbr("Shoes_Final",   "#0A0A0A",
-                     roughness=0.55, specular=0.35),
-
-    # Roupa genérica (fallback) — cinza escuro
-    "cloth": mat_pbr("Cloth_Final",   "#2C2C2C",
-                     roughness=0.93, specular=0.02),
-
-    # Cabelo — castanho muito escuro, ligeiramente brilhante
-    "hair": mat_pbr("Hair_Final",    "#1A0D05",
-                    roughness=0.72, specular=0.28),
-
-    # Esclera dos olhos — branca levemente amarelada
-    "eye_sclera": mat_pbr("Eye_Sclera",  "#F0EBE2",
-                           roughness=0.03, specular=0.85),
-
-    # Íris — castanho escuro rico
-    "eye_iris": mat_pbr("Eye_Iris",    "#2E1A0A",
-                        roughness=0.05, specular=0.80),
-
-    # Pupila — preta brilhante
-    "eye_pupil": mat_pbr("Eye_Pupil",   "#050302",
-                         roughness=0.00, specular=0.98),
-
-    # Córnea — quase invisível, muito reflectora
-    "eye_cornea": mat_pbr("Eye_Cornea",  "#FFFFFF",
-                          roughness=0.00, specular=1.0, alpha=0.06),
-
-    # Dentes
-    "teeth": mat_pbr("Teeth_Final",  "#EDE8DC",
-                     roughness=0.20, specular=0.65),
-
-    # Unhas
-    "nail": mat_pbr("Nails_Final",   "#D4967A",
-                    roughness=0.16, specular=0.72),
+    "skin":       mat_pbr("Skin_Final",    "#B5651D", roughness=0.55, subsurface=0.22, specular=0.38),
+    "face":       mat_pbr("Face_Final",    "#C0714A", roughness=0.52, subsurface=0.28, specular=0.40),
+    "tshirt":     mat_pbr("TShirt_Final",  "#3A3A3A", roughness=0.95, specular=0.02),
+    "pants":      mat_pbr("Pants_Final",   "#1A2235", roughness=0.92, specular=0.03),
+    "shoes":      mat_pbr("Shoes_Final",   "#0A0A0A", roughness=0.55, specular=0.35),
+    "cloth":      mat_pbr("Cloth_Final",   "#2C2C2C", roughness=0.93, specular=0.02),
+    "hair":       mat_pbr("Hair_Final",    "#1A0D05", roughness=0.72, specular=0.28),
+    "eye_sclera": mat_pbr("Eye_Sclera",    "#F0EBE2", roughness=0.03, specular=0.85),
+    "eye_iris":   mat_pbr("Eye_Iris",      "#2E1A0A", roughness=0.05, specular=0.80),
+    "eye_pupil":  mat_pbr("Eye_Pupil",     "#050302", roughness=0.00, specular=0.98),
+    "eye_cornea": mat_pbr("Eye_Cornea",    "#FFFFFF",  roughness=0.00, specular=1.0, alpha=0.06),
+    "teeth":      mat_pbr("Teeth_Final",   "#EDE8DC", roughness=0.20, specular=0.65),
+    "nail":       mat_pbr("Nails_Final",   "#D4967A", roughness=0.16, specular=0.72),
 }
-
 log(f"Paleta criada: {len(MATS)} materiais")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. ATRIBUIR MATERIAIS — com distinção real entre corpo e roupa
+# 5. REMOVER OLHOS EXISTENTES (antes de iterar — evita ReferenceError)
+#    Guardamos os NOMES antes de deletar; após delete o .name é inválido.
+# ─────────────────────────────────────────────────────────────────────────────
+
+step("Remover olhos existentes")
+EYE_KW = ("eye", "sclera", "iris", "cornea", "pupil")
+eye_names = [
+    o.name for o in bpy.data.objects
+    if o.type == "MESH" and any(k in o.name.lower() for k in EYE_KW)
+]
+for name in eye_names:
+    obj_ref = bpy.data.objects.get(name)
+    if obj_ref is not None:
+        bpy.data.objects.remove(obj_ref, do_unlink=True)
+        log(f"  Removido: {name}")
+
+# Reconstruir all_meshes — referências antigas são inválidas após delete
+all_meshes = [o for o in bpy.data.objects if o.type == "MESH"]
+log(f"Meshes após remover olhos: {len(all_meshes)}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. ATRIBUIR MATERIAIS
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Atribuir materiais")
-
-# Remover todos os olhos existentes agora (vamos recriar a seguir)
-# para não confundir a classificação
-existing_eye_objs = [
-    o for o in list(bpy.data.objects)
-    if o.type == "MESH" and
-    any(k in o.name.lower() for k in ("eye", "sclera", "iris", "cornea", "pupil"))
-]
-for o in existing_eye_objs:
-    bpy.data.objects.remove(o, do_unlink=True)
-    log(f"  Olho existente removido: {o.name}")
-
-# Re-listar meshes após remoção dos olhos
-all_meshes = [o for o in bpy.data.objects if o.type == "MESH"]
-
-# Contadores para estatísticas
 cls_counts: dict = {}
 
 for obj in all_meshes:
@@ -436,7 +394,7 @@ for obj in all_meshes:
     elif cls == "teeth":
         assign_mat(obj, MATS["teeth"])
 
-    elif cls == "tongue":
+    elif cls in ("tongue",):
         assign_mat(obj, MATS["skin"])
 
     elif cls == "hair":
@@ -446,49 +404,38 @@ for obj in all_meshes:
         assign_mat(obj, MATS["nail"])
 
     elif cls == "cloth":
-        # Distinguir t-shirt de calças pelo centro de massa Z
-        vz = [obj.matrix_world @ v.co for v in obj.data.vertices]
-        if vz:
-            center_z = sum(v.z for v in vz) / len(vz)
-            # Acima da anca = tronco = t-shirt; abaixo = pernas = calças
-            if center_z > hip_z:
-                # Verificar se é mais provável sapato (muito baixo)
-                min_z = min(v.z for v in vz)
-                if min_z < body_minz + body_h * 0.08:
-                    assign_mat(obj, MATS["shoes"])
-                    mat_name = "shoes"
-                else:
-                    assign_mat(obj, MATS["tshirt"])
-                    mat_name = "tshirt"
+        # Distinguir t-shirt / calças / sapatos pela posição Z
+        try:
+            vz_world = [obj.matrix_world @ v.co for v in obj.data.vertices]
+            center_z = sum(v.z for v in vz_world) / len(vz_world)
+            min_z    = min(v.z for v in vz_world)
+
+            if min_z < body_minz + body_h * 0.08:
+                sub_mat  = MATS["shoes"];  mat_name = "shoes"
+            elif center_z > hip_z:
+                sub_mat  = MATS["tshirt"]; mat_name = "tshirt"
             else:
-                # Abaixo da anca: calças ou sapatos
-                min_z = min(v.z for v in vz)
-                if min_z < body_minz + body_h * 0.08:
-                    assign_mat(obj, MATS["shoes"])
-                    mat_name = "shoes"
-                else:
-                    assign_mat(obj, MATS["pants"])
-                    mat_name = "pants"
-        else:
-            assign_mat(obj, MATS["cloth"])
-            mat_name = "cloth"
+                sub_mat  = MATS["pants"];  mat_name = "pants"
+        except Exception:
+            sub_mat  = MATS["cloth"];  mat_name = "cloth"
+
+        assign_mat(obj, sub_mat)
         log(f"  CLOTH '{obj.name}' ({n_verts}v) → {mat_name}")
         report["mat_assignments"].append({"obj": obj.name, "mat": mat_name})
         continue
 
     else:  # skin
-        # Corpo principal = face (mais rosado); outros = skin
         mat = MATS["face"] if obj == body else MATS["skin"]
         assign_mat(obj, mat)
 
     log(f"  {cls.upper():8s} '{obj.name}' ({n_verts}v)")
     report["mat_assignments"].append({"obj": obj.name, "mat": cls})
 
-log(f"Materiais atribuídos: {cls_counts}")
+log(f"Classificações: {cls_counts}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. OLHOS ANATÓMICOS — sempre recriados de raiz
+# 7. OLHOS ANATÓMICOS — recriados de raiz
 #    4 camadas por olho: esclera + íris + pupila + córnea
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -497,7 +444,6 @@ step("Olhos anatómicos")
 sclera_r = head_r * 0.130
 eye_sep  = head_r * 0.52
 eye_z    = head_cz + head_r * 0.10
-# Face está na direcção -Y em T-pose
 sclera_y = face_y - sclera_r * 0.30
 iris_r   = sclera_r * 0.56
 pupil_r  = sclera_r * 0.28
@@ -513,7 +459,7 @@ for side, sx in [("L", eye_sep / 2), ("R", -eye_sep / 2)]:
     assign_mat(sc, MATS["eye_sclera"])
     smooth_obj(sc, 60)
 
-    # Íris
+    # Iris
     bpy.ops.mesh.primitive_cylinder_add(
         vertices=64, radius=iris_r, depth=sclera_r * 0.04,
         location=(sx, sclera_y - sclera_r * 0.86, eye_z))
@@ -534,7 +480,7 @@ for side, sx in [("L", eye_sep / 2), ("R", -eye_sep / 2)]:
     bpy.ops.object.transform_apply(rotation=True)
     assign_mat(pu, MATS["eye_pupil"])
 
-    # Córnea (esfera quasi-transparente, muito brilhante)
+    # Cornea
     bpy.ops.mesh.primitive_uv_sphere_add(
         segments=64, ring_count=32, radius=sclera_r * 1.01,
         location=(sx, sclera_y, eye_z))
@@ -543,11 +489,11 @@ for side, sx in [("L", eye_sep / 2), ("R", -eye_sep / 2)]:
     assign_mat(co, MATS["eye_cornea"])
     smooth_obj(co, 60)
 
-log("Olhos anatómicos criados (esclera + íris + pupila + córnea × 2)")
+log("Olhos criados (esclera + iris + pupila + cornea x2)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. VERIFICAR / CRIAR RIG
+# 8. VERIFICAR / CRIAR RIG
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Verificar / criar rig")
@@ -570,7 +516,7 @@ if all_arms:
         for obj in bpy.data.objects:
             if obj.type == "MESH" and "hair" in obj.name.lower():
                 if obj.parent != arm:
-                    obj.parent = arm
+                    obj.parent      = arm
                     obj.parent_type = "BONE"
                     obj.parent_bone = head_bone.name
                     log(f"  Cabelo '{obj.name}' → osso Head")
@@ -589,26 +535,26 @@ else:
         edit_bones.remove(b)
 
     BONES = [
-        ("Hips",       (0,      0, hip_z),          (0,      0, waist_z),               None),
-        ("Spine",      (0,      0, waist_z),         (0,      0, waist_z + 0.14),        "Hips"),
-        ("Spine1",     (0,      0, waist_z + 0.14),  (0,      0, bust_z),                "Spine"),
-        ("Chest",      (0,      0, bust_z),           (0,      0, shoulder_z),            "Spine1"),
-        ("Neck",       (0,      0, shoulder_z),       (0,      0, head_cz - head_r),      "Chest"),
-        ("Head",       (0,      0, head_cz - head_r),(0,      0, head_cz + head_r * 1.1),"Neck"),
-        ("UpperLeg_L", (-0.090, 0, hip_z),           (-0.090, 0, hip_z * 0.55),          "Hips"),
-        ("LowerLeg_L", (-0.090, 0, hip_z * 0.55),   (-0.090, 0, ankle_z + 0.06),        "UpperLeg_L"),
-        ("Foot_L",     (-0.090, 0, ankle_z + 0.06),  (-0.075, -0.08, ankle_z),           "LowerLeg_L"),
-        ("UpperLeg_R", (0.090,  0, hip_z),           (0.090,  0, hip_z * 0.55),          "Hips"),
-        ("LowerLeg_R", (0.090,  0, hip_z * 0.55),   (0.090,  0, ankle_z + 0.06),        "UpperLeg_R"),
-        ("Foot_R",     (0.090,  0, ankle_z + 0.06),  (0.075,  -0.08, ankle_z),           "LowerLeg_R"),
-        ("Shoulder_L", (-0.080, 0, shoulder_z),      (-0.180, 0, shoulder_z),            "Chest"),
-        ("UpperArm_L", (-0.180, 0, shoulder_z),      (-0.260, 0, elbow_z),               "Shoulder_L"),
-        ("LowerArm_L", (-0.260, 0, elbow_z),         (-0.280, 0, wrist_z),               "UpperArm_L"),
-        ("Hand_L",     (-0.280, 0, wrist_z),         (-0.285, 0, wrist_z - 0.09),        "LowerArm_L"),
-        ("Shoulder_R", (0.080,  0, shoulder_z),      (0.180,  0, shoulder_z),            "Chest"),
-        ("UpperArm_R", (0.180,  0, shoulder_z),      (0.260,  0, elbow_z),               "Shoulder_R"),
-        ("LowerArm_R", (0.260,  0, elbow_z),         (0.280,  0, wrist_z),               "UpperArm_R"),
-        ("Hand_R",     (0.280,  0, wrist_z),         (0.285,  0, wrist_z - 0.09),        "LowerArm_R"),
+        ("Hips",       (0,      0, hip_z),          (0,      0, waist_z),                None),
+        ("Spine",      (0,      0, waist_z),         (0,      0, waist_z + 0.14),         "Hips"),
+        ("Spine1",     (0,      0, waist_z + 0.14),  (0,      0, bust_z),                 "Spine"),
+        ("Chest",      (0,      0, bust_z),           (0,      0, shoulder_z),             "Spine1"),
+        ("Neck",       (0,      0, shoulder_z),       (0,      0, head_cz - head_r),       "Chest"),
+        ("Head",       (0,      0, head_cz - head_r),(0,      0, head_cz + head_r * 1.1), "Neck"),
+        ("UpperLeg_L", (-0.090, 0, hip_z),           (-0.090, 0, hip_z * 0.55),           "Hips"),
+        ("LowerLeg_L", (-0.090, 0, hip_z * 0.55),   (-0.090, 0, ankle_z + 0.06),         "UpperLeg_L"),
+        ("Foot_L",     (-0.090, 0, ankle_z + 0.06),  (-0.075, -0.08, ankle_z),            "LowerLeg_L"),
+        ("UpperLeg_R", (0.090,  0, hip_z),           (0.090,  0, hip_z * 0.55),           "Hips"),
+        ("LowerLeg_R", (0.090,  0, hip_z * 0.55),   (0.090,  0, ankle_z + 0.06),         "UpperLeg_R"),
+        ("Foot_R",     (0.090,  0, ankle_z + 0.06),  (0.075,  -0.08, ankle_z),            "LowerLeg_R"),
+        ("Shoulder_L", (-0.080, 0, shoulder_z),      (-0.180, 0, shoulder_z),             "Chest"),
+        ("UpperArm_L", (-0.180, 0, shoulder_z),      (-0.260, 0, elbow_z),                "Shoulder_L"),
+        ("LowerArm_L", (-0.260, 0, elbow_z),         (-0.280, 0, wrist_z),                "UpperArm_L"),
+        ("Hand_L",     (-0.280, 0, wrist_z),         (-0.285, 0, wrist_z - 0.09),         "LowerArm_L"),
+        ("Shoulder_R", (0.080,  0, shoulder_z),      (0.180,  0, shoulder_z),             "Chest"),
+        ("UpperArm_R", (0.180,  0, shoulder_z),      (0.260,  0, elbow_z),                "Shoulder_R"),
+        ("LowerArm_R", (0.260,  0, elbow_z),         (0.280,  0, wrist_z),                "UpperArm_R"),
+        ("Hand_R",     (0.280,  0, wrist_z),         (0.285,  0, wrist_z - 0.09),         "LowerArm_R"),
     ]
 
     created = {}
@@ -640,10 +586,10 @@ else:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. ILUMINAÇÃO FOUR-POINT
+# 9. ILUMINAÇÃO FOUR-POINT
 # ─────────────────────────────────────────────────────────────────────────────
 
-step("Iluminação")
+step("Iluminacao")
 for obj in list(bpy.data.objects):
     if obj.type == "LIGHT":
         bpy.data.objects.remove(obj, do_unlink=True)
@@ -653,7 +599,7 @@ center = Vector((0, 0, body_h * 0.55))
 def add_light(name, loc, energy, size, color):
     bpy.ops.object.light_add(type="AREA", location=loc)
     light = bpy.context.active_object
-    light.name = name
+    light.name       = name
     light.data.energy = energy
     light.data.size   = size
     light.data.color  = color
@@ -664,23 +610,23 @@ add_light("Key",  ( 2.2, -3.0,  1.8), 1600, 2.0, (1.00, 0.95, 0.88))
 add_light("Fill", (-2.0, -1.5,  1.2),  700, 3.5, (0.86, 0.91, 1.00))
 add_light("Rim",  ( 0.2,  3.0,  2.2),  900, 1.5, (1.00, 0.98, 0.94))
 add_light("Top",  ( 0.0,  0.0,  3.5),  400, 4.0, (1.00, 1.00, 1.00))
-log("Iluminação four-point configurada")
+log("Iluminacao four-point configurada")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9. CÂMARA
+# 10. CAMARA
 # ─────────────────────────────────────────────────────────────────────────────
 
-step("Câmara")
+step("Camara")
 for obj in list(bpy.data.objects):
     if obj.type == "CAMERA":
         bpy.data.objects.remove(obj, do_unlink=True)
 
 bpy.ops.object.camera_add(location=(0, -3.8, body_h * 0.54))
 cam = bpy.context.active_object
-cam.name = "Camera_Final"
-cam.data.type = "PERSP"
-cam.data.lens = 85
+cam.name       = "Camera_Final"
+cam.data.type  = "PERSP"
+cam.data.lens  = 85
 d = center - Vector(cam.location)
 cam.rotation_euler = d.to_track_quat("-Z", "Y").to_euler()
 scene.camera = cam
@@ -696,23 +642,23 @@ bg.inputs["Color"].default_value    = (0.03, 0.03, 0.05, 1.0)
 bg.inputs["Strength"].default_value = 0.15
 wo = wn.new("ShaderNodeOutputWorld")
 wl.new(bg.outputs["Background"], wo.inputs["Surface"])
-log("Câmara 85mm + world configurados")
+log("Camara 85mm + world configurados")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10. RENDER PREVIEW
+# 11. RENDER PREVIEW
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Render")
-scene.render.engine                           = "BLENDER_WORKBENCH"
-scene.render.resolution_x                    = 1024
-scene.render.resolution_y                    = 1024
-scene.render.resolution_percentage           = 100
-scene.render.image_settings.file_format      = "PNG"
-scene.display.shading.light                  = "STUDIO"
-scene.display.shading.color_type             = "MATERIAL"
+scene.render.engine                            = "BLENDER_WORKBENCH"
+scene.render.resolution_x                     = 1024
+scene.render.resolution_y                     = 1024
+scene.render.resolution_percentage            = 100
+scene.render.image_settings.file_format       = "PNG"
+scene.display.shading.light                   = "STUDIO"
+scene.display.shading.color_type              = "MATERIAL"
 scene.display.shading.show_specular_highlight = True
-scene.display.shading.show_shadows           = True
+scene.display.shading.show_shadows            = True
 
 for sl in ("paint.sl", "outdoor.sl", "rim.sl"):
     try:
@@ -729,11 +675,11 @@ try:
         log(f"Preview: {Path(preview_path).stat().st_size // 1024} KB")
         report["output_files"].append("character_final_preview.png")
 except Exception as exc:
-    log(f"Render falhou (não crítico): {exc}", "WARN")
+    log(f"Render falhou (nao critico): {exc}", "WARN")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 11. GUARDAR BLEND FINAL
+# 12. GUARDAR BLEND FINAL
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Guardar blend final")
@@ -747,7 +693,7 @@ except Exception as exc:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12. EXPORTAR GLB FINAL
+# 13. EXPORTAR GLB FINAL
 # ─────────────────────────────────────────────────────────────────────────────
 
 step("Exportar GLB final")
@@ -766,7 +712,7 @@ try:
         export_morph=True,
         export_yup=True,
     )
-    log("GLB exportado (parâmetros completos)")
+    log("GLB exportado (parametros completos)")
 except TypeError:
     try:
         bpy.ops.export_scene.gltf(
@@ -775,7 +721,7 @@ except TypeError:
             export_apply=True,
             export_skins=True,
         )
-        log("GLB exportado (modo mínimo)")
+        log("GLB exportado (modo minimo)")
     except Exception as exc2:
         log(f"GLB falhou: {exc2}", "ERROR")
         save_report()
@@ -791,16 +737,16 @@ if Path(glb_final).exists():
     report["output_files"].append("character_final.glb")
     report["glb_final_kb"] = kb
 else:
-    log("GLB final não encontrado", "ERROR")
+    log("GLB final nao encontrado", "ERROR")
     save_report()
     sys.exit(1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 13. RELATÓRIO
+# 14. RELATORIO
 # ─────────────────────────────────────────────────────────────────────────────
 
-step("Relatório")
+step("Relatorio")
 total_verts  = sum(len(o.data.vertices) for o in bpy.data.objects if o.type == "MESH")
 total_meshes = len([o for o in bpy.data.objects if o.type == "MESH"])
 total_mats   = len(bpy.data.materials)
@@ -816,10 +762,10 @@ report["output_files"].append("refine_report.json")
 save_report()
 
 print("\n" + "=" * 60)
-print("REFINE — FASE 3 COMPLETA")
+print("REFINE - FASE 3 COMPLETA")
 print("=" * 60)
 print(f"  Blender   : {bpy.app.version_string}")
-print(f"  Meshes    : {total_meshes}  |  Vértices: {total_verts}")
+print(f"  Meshes    : {total_meshes}  |  Vertices: {total_verts}")
 print(f"  Materiais : {total_mats}  |  Rig: {report.get('rig_bones',0)} ossos")
 for fn in report["output_files"]:
     fp = OUTDIR / fn
@@ -831,4 +777,4 @@ if report["errors"]:
     print(f"\n  ERROS: {report['errors']}")
     sys.exit(1)
 print("=" * 60)
-print("→ Produto final: character_final.glb")
+print("-> Produto final: character_final.glb")
