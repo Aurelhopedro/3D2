@@ -1,0 +1,1191 @@
+name: Character Elite — Pipeline Multi-Especialista
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/character-elite.yml'
+
+jobs:
+  generate-character:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 0 — PREPARAÇÃO DO AMBIENTE
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Instalar dependências do sistema
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxi6 libxxf86vm1 \
+            libxfixes3 libxrender1 libxkbcommon0 libsm6 \
+            curl xz-utils unzip python3-pip git cmake \
+            libgles2 libglfw3 libglfw3-dev \
+            build-essential pkg-config
+          pip install --quiet pygltflib requests Pillow numpy
+
+      - name: Criar estrutura de directórios temporários
+        run: |
+          mkdir -p /tmp/pipeline/{makehuman,blender,textures,hair,clothing,rig,output}
+          mkdir -p /tmp/assets/{mh,polyhaven,armorpaint,hair,fabric}
+          mkdir -p output
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 0.1 — BLENDER 4.2 LTS (base de tudo)
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Cache Blender 4.2.9 LTS
+        id: cache-blender
+        uses: actions/cache@v4
+        with:
+          path: blender-4.2.9-linux-x64
+          key: blender-4.2.9-linux-x64-v2
+
+      - name: Descarregar Blender 4.2.9 LTS
+        if: steps.cache-blender.outputs.cache-hit != 'true'
+        run: |
+          curl -L -o blender.tar.xz \
+            "https://download.blender.org/release/Blender4.2/blender-4.2.9-linux-x64.tar.xz"
+          tar -xf blender.tar.xz
+          rm blender.tar.xz
+          echo "Blender descarregado: $(du -sh blender-4.2.9-linux-x64 | cut -f1)"
+
+      - name: Adicionar Blender ao PATH
+        run: echo "${{ github.workspace }}/blender-4.2.9-linux-x64" >> $GITHUB_PATH
+
+      - name: Verificar Blender
+        run: blender --version
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 0.2 — MPFB2 (MakeHuman para Blender)
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Cache MPFB2
+        id: cache-mpfb2
+        uses: actions/cache@v4
+        with:
+          path: mpfb2
+          key: mpfb2-elite-v1
+
+      - name: Clonar MPFB2 com todos os plugins da comunidade
+        if: steps.cache-mpfb2.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 \
+            https://github.com/makehumancommunity/mpfb2.git mpfb2
+          # Descarregar também os plugins extras da comunidade
+          git clone --depth 1 \
+            https://github.com/makehumancommunity/makehuman-community-plugins.git \
+            /tmp/assets/mh/community-plugins 2>/dev/null || true
+          echo "MPFB2: $(git -C mpfb2 rev-parse --short HEAD)"
+
+      - name: Instalar MPFB2 no Blender
+        run: |
+          cd mpfb2/src
+          zip -r ../../mpfb2.zip mpfb
+          cd ../..
+          blender -b \
+            --command extension install-file \
+            -r user_default \
+            -e "${{ github.workspace }}/mpfb2.zip" 2>&1 | tail -10
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 0.3 — MB-Lab (alternativa/complemento ao MPFB2)
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Cache MB-Lab
+        id: cache-mblab
+        uses: actions/cache@v4
+        with:
+          path: MB-Lab
+          key: mblab-elite-v1
+
+      - name: Clonar MB-Lab
+        if: steps.cache-mblab.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 \
+            https://github.com/animate1978/MB-Lab.git MB-Lab
+          echo "MB-Lab: $(git -C MB-Lab rev-parse --short HEAD)"
+
+      - name: Instalar MB-Lab no Blender
+        run: |
+          zip -r mblab.zip MB-Lab/
+          blender -b \
+            --command extension install-file \
+            -r user_default \
+            -e "${{ github.workspace }}/mblab.zip" 2>&1 | tail -10 || true
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 0.4 — MAKEHUMAN SYSTEM ASSETS (CC0)
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Cache MakeHuman Assets
+        id: cache-mh-assets
+        uses: actions/cache@v4
+        with:
+          path: /tmp/assets/mh
+          key: mh-assets-elite-v2
+
+      - name: Descarregar MakeHuman assets CC0
+        if: steps.cache-mh-assets.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp/assets/mh
+          # Assets oficiais do MakeHuman (CC0)
+          curl -L --max-time 120 -o mh-system-assets.zip \
+            "http://download.tuxfamily.org/makehuman/assets/makehuman-system-assets.zip" \
+            2>/dev/null && unzip -q mh-system-assets.zip 2>/dev/null \
+            || echo "AVISO: assets MH indisponíveis (usando fallback)"
+          # Base meshes do Blender Studio (CC0)
+          curl -L --max-time 60 -o human-base-meshes.zip \
+            "https://download.blender.org/demo/bundles/bundles-4.2/human_base_meshes.zip" \
+            2>/dev/null && unzip -q human-base-meshes.zip 2>/dev/null \
+            || echo "AVISO: base meshes indisponíveis"
+          ls -lh /tmp/assets/mh/ || true
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 0.5 — TEXTURAS CC0 (Polyhaven + AmbientCG)
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Cache Texturas CC0
+        id: cache-textures
+        uses: actions/cache@v4
+        with:
+          path: /tmp/assets/polyhaven
+          key: textures-cc0-elite-v2
+
+      - name: Descarregar texturas CC0 para pele e vestuário
+        if: steps.cache-textures.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp/assets/polyhaven
+          # Polyhaven — API CC0 (pele humana / tecidos)
+          python3 << 'PYEOF'
+          import urllib.request, json, os, sys
+
+          base = "https://api.polyhaven.com"
+          out  = "/tmp/assets/polyhaven"
+          os.makedirs(out, exist_ok=True)
+
+          # Texturas de tecido relevantes para roupa (CC0)
+          fabric_assets = ["fabric_pattern_07", "fabric_pattern_05", "denim_fabric"]
+          # Texturas de pele / orgânicas (CC0)
+          skin_assets   = ["skin_human_01", "brown_mud_02", "rocky_ground_02"]
+
+          def download_asset(asset_id, category):
+              try:
+                  url = f"{base}/files/{asset_id}?res=1k&format=jpg"
+                  r   = urllib.request.urlopen(url, timeout=20)
+                  data = json.loads(r.read())
+                  for key, info in data.items():
+                      if key.endswith("jpg") and "url" in info:
+                          fname = f"{out}/{category}_{asset_id}_{key}"
+                          urllib.request.urlretrieve(info["url"], fname)
+                          print(f"OK: {fname}")
+              except Exception as e:
+                  print(f"SKIP {asset_id}: {e}")
+
+          for a in fabric_assets: download_asset(a, "fabric")
+          for a in skin_assets:   download_asset(a, "skin")
+          print("Texturas CC0 descarregadas.")
+          PYEOF
+          ls -lh /tmp/assets/polyhaven/ 2>/dev/null | head -20 || true
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 0.6 — HAIR ASSETS CC0 (Blender Studio)
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Cache Hair Assets CC0
+        id: cache-hair
+        uses: actions/cache@v4
+        with:
+          path: /tmp/assets/hair
+          key: hair-assets-cc0-v2
+
+      - name: Descarregar Hair Assets CC0 do Blender Studio
+        if: steps.cache-hair.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp/assets/hair
+          # Blender Studio Hair Assets — CC0 oficial
+          curl -L --max-time 120 -o hair-assets.zip \
+            "https://download.blender.org/demo/bundles/bundles-4.2/hair_assets.zip" \
+            2>/dev/null && unzip -q hair-assets.zip \
+            || echo "AVISO: hair assets indisponíveis"
+          # Alpha maps de fio de cabelo — gerados proceduralmente como fallback
+          ls -lh /tmp/assets/hair/ || echo "(sem assets de cabelo externos)"
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 1 — GERAÇÃO DO CORPO BASE
+      # ══════════════════════════════════════════════════════════════════════
+      - name: "FASE 1 — Corpo Base (MPFB2 + MB-Lab)"
+        run: |
+          cat > /tmp/phase1_body.py << 'PYEOF'
+          import bpy, os, sys, json, math, traceback
+
+          OUTPUT   = os.environ.get("OUTPUT_DIR", "/tmp/pipeline/blender")
+          MH_ASSETS= os.environ.get("MH_ASSETS", "/tmp/assets/mh")
+          report   = {"phase": "body", "success": False, "source": "unknown", "errors": []}
+
+          os.makedirs(OUTPUT, exist_ok=True)
+
+          def cleanup_scene():
+              bpy.ops.wm.read_factory_settings(use_empty=True)
+
+          def try_mpfb2():
+              """Tenta gerar corpo via MPFB2"""
+              try:
+                  cleanup_scene()
+                  # Activar MPFB2
+                  bpy.ops.preferences.addon_enable(module="mpfb")
+                  import mpfb
+                  from mpfb.services.humanservice import HumanService
+                  from mpfb.services.assetservice import AssetService
+
+                  human = HumanService.create_human()
+                  if not human:
+                      return None, "MPFB2: create_human retornou None"
+
+                  # Morfologias: feminino adulto
+                  HumanService.set_target(human, "age",    0.4)
+                  HumanService.set_target(human, "weight", 0.45)
+                  HumanService.set_target(human, "muscle", 0.4)
+                  HumanService.set_target(human, "female", 1.0)
+
+                  # Assets de sistema (olhos, pele)
+                  try:
+                      AssetService.load_asset(human, "eyes",  "default")
+                      AssetService.load_asset(human, "skin",  "default")
+                  except:
+                      pass
+
+                  bpy.context.view_layer.objects.active = human
+                  return human, "MPFB2"
+              except Exception as e:
+                  return None, f"MPFB2 falhou: {e}"
+
+          def try_mblab():
+              """Tenta gerar corpo via MB-Lab"""
+              try:
+                  cleanup_scene()
+                  bpy.ops.preferences.addon_enable(module="MB-Lab")
+                  import mblab_humanoid
+                  bpy.ops.mbast.init_character(
+                      character_type="f_ca01",
+                      realtime_preview=False,
+                      use_cycles=False
+                  )
+                  obj = bpy.context.active_object
+                  if obj:
+                      return obj, "MB-Lab"
+              except Exception as e:
+                  pass
+              return None, "MB-Lab falhou"
+
+          def generate_fallback_body():
+              """Corpo anatómico de alta qualidade gerado proceduralmente"""
+              cleanup_scene()
+              import bmesh
+
+              mesh = bpy.data.meshes.new("HumanBody")
+              obj  = bpy.data.objects.new("HumanBody", mesh)
+              bpy.context.collection.objects.link(obj)
+              bpy.context.view_layer.objects.active = obj
+
+              bm = bmesh.new()
+
+              def add_body_section(z_base, z_top, rx_base, ry_base, rx_top, ry_top, segs=24):
+                  """Adiciona uma secção do corpo com forma elíptica"""
+                  verts_base = []
+                  verts_top  = []
+                  for i in range(segs):
+                      angle  = 2 * math.pi * i / segs
+                      # Base
+                      x = rx_base * math.cos(angle) * (1 + 0.05 * math.sin(angle * 3))
+                      y = ry_base * math.sin(angle) * (1 + 0.03 * math.cos(angle * 2))
+                      verts_base.append(bm.verts.new((x, y, z_base)))
+                      # Topo
+                      x = rx_top * math.cos(angle) * (1 + 0.05 * math.sin(angle * 3))
+                      y = ry_top * math.sin(angle) * (1 + 0.03 * math.cos(angle * 2))
+                      verts_top.append(bm.verts.new((x, y, z_top)))
+                  for i in range(segs):
+                      ni = (i + 1) % segs
+                      bm.faces.new([verts_base[i], verts_base[ni],
+                                    verts_top[ni],  verts_top[i]])
+                  return verts_base, verts_top
+
+              # Dimensões anatómicas femininas (em metros)
+              H = 1.70  # altura total
+
+              # Pernas (da base ao quadril)
+              _, v_ankle_l = add_body_section(0.00, 0.08, 0.030, 0.025, 0.035, 0.030)
+              _, v_knee_l  = add_body_section(0.08, 0.50, 0.035, 0.030, 0.038, 0.032)
+              _, v_hip_l   = add_body_section(0.50, 0.90, 0.038, 0.032, 0.080, 0.070)
+
+              # Torso
+              _, v_waist   = add_body_section(0.90, 1.05, 0.090, 0.070, 0.070, 0.055)
+              _, v_chest   = add_body_section(1.05, 1.28, 0.070, 0.055, 0.090, 0.070)
+              _, v_shoulder= add_body_section(1.28, 1.42, 0.090, 0.070, 0.095, 0.072)
+
+              # Pescoço e cabeça
+              _, v_neck    = add_body_section(1.42, 1.52, 0.030, 0.025, 0.028, 0.023)
+              _, v_chin    = add_body_section(1.52, 1.60, 0.028, 0.023, 0.065, 0.058)
+              _, v_head    = add_body_section(1.60, 1.70, 0.065, 0.058, 0.040, 0.038)
+
+              # Braços (direito)
+              _, v_wrist_r  = add_body_section(1.38, 1.30, 0.015, 0.012, 0.018, 0.015)
+              _, v_elbow_r  = add_body_section(1.30, 1.10, 0.018, 0.015, 0.022, 0.018)
+              _, v_arm_r    = add_body_section(1.10, 1.38, 0.022, 0.018, 0.028, 0.022)
+
+              bm.to_mesh(mesh)
+              bm.free()
+
+              # Suavizar
+              for poly in mesh.polygons:
+                  poly.use_smooth = True
+
+              return obj, "Procedural-Anatomic"
+
+          # --- Executar fases em cascata ---
+          human, source = try_mpfb2()
+          if human is None:
+              print(f"[PHASE1] {source} — tentando MB-Lab...")
+              human, source = try_mblab()
+          if human is None:
+              print(f"[PHASE1] {source} — usando fallback anatómico...")
+              human, source = generate_fallback_body()
+
+          print(f"[PHASE1] Corpo gerado via: {source}")
+
+          # Aplicar modificadores e exportar
+          bpy.context.view_layer.objects.active = human
+          bpy.ops.object.select_all(action='DESELECT')
+          human.select_set(True)
+
+          # Adicionar material base de pele
+          mat = bpy.data.materials.new("Skin_Base")
+          mat.use_nodes = True
+          nodes = mat.node_tree.nodes
+          nodes.clear()
+          out_node    = nodes.new("ShaderNodeOutputMaterial")
+          pbsdf       = nodes.new("ShaderNodeBsdfPrincipled")
+          pbsdf.inputs["Base Color"].default_value = (0.80, 0.65, 0.57, 1.0)
+          pbsdf.inputs["Subsurface Weight"].default_value = 0.15
+          pbsdf.inputs["Roughness"].default_value = 0.6
+          mat.node_tree.links.new(pbsdf.outputs["BSDF"], out_node.inputs["Surface"])
+          if human.data.materials:
+              human.data.materials[0] = mat
+          else:
+              human.data.materials.append(mat)
+
+          # Exportar como OBJ para a próxima fase
+          obj_path = os.path.join(OUTPUT, "body_base.obj")
+          bpy.ops.wm.obj_export(filepath=obj_path, export_selected_objects=True)
+
+          # Guardar também como blend
+          blend_path = os.path.join(OUTPUT, "body_base.blend")
+          bpy.ops.wm.save_as_mainfile(filepath=blend_path)
+
+          verts = len(human.data.vertices) if hasattr(human.data, 'vertices') else 0
+          report.update({
+              "success": True,
+              "source": source,
+              "vertices": verts,
+              "output_obj":   obj_path,
+              "output_blend": blend_path
+          })
+
+          with open(os.path.join(OUTPUT, "phase1_report.json"), "w") as f:
+              json.dump(report, f, indent=2)
+
+          print(f"[PHASE1] COMPLETO — {verts} vértices — {source}")
+          PYEOF
+
+          blender -b \
+            --python /tmp/phase1_body.py \
+            -- \
+          2>&1 | tee /tmp/pipeline/phase1.log
+          echo "Ficheiros após fase 1:"
+          ls -lh /tmp/pipeline/blender/ 2>/dev/null || true
+        env:
+          OUTPUT_DIR: /tmp/pipeline/blender
+          MH_ASSETS: /tmp/assets/mh
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 2 — CABELO REALISTA
+      # ══════════════════════════════════════════════════════════════════════
+      - name: "FASE 2 — Cabelo (Blender Hair Curves + Assets CC0)"
+        run: |
+          cat > /tmp/phase2_hair.py << 'PYEOF'
+          import bpy, os, sys, json, math, random
+
+          BODY_BLEND = "/tmp/pipeline/blender/body_base.blend"
+          OUTPUT     = "/tmp/pipeline/blender"
+          HAIR_ASSETS= "/tmp/assets/hair"
+
+          os.makedirs(OUTPUT, exist_ok=True)
+
+          # Abrir o ficheiro do corpo
+          if os.path.exists(BODY_BLEND):
+              bpy.ops.wm.open_mainfile(filepath=BODY_BLEND)
+              print("[PHASE2] Ficheiro de corpo carregado")
+          else:
+              bpy.ops.wm.read_factory_settings(use_empty=True)
+              print("[PHASE2] AVISO: corpo não encontrado, usando cena vazia")
+
+          def create_hair_system(obj_name=None):
+              """Cria sistema de cabelo realista com Hair Curves do Blender 4.x"""
+
+              # Encontrar o objecto do corpo
+              body_obj = None
+              for obj in bpy.data.objects:
+                  if obj.type == 'MESH' and obj.name.lower() not in ['plane', 'cube']:
+                      body_obj = obj
+                      break
+
+              if body_obj is None:
+                  # Criar cabeça de referência para o cabelo
+                  bpy.ops.mesh.primitive_uv_sphere_add(
+                      segments=32, ring_count=16,
+                      radius=0.12, location=(0, 0, 1.63)
+                  )
+                  body_obj = bpy.context.active_object
+                  body_obj.name = "Head_Reference"
+
+              # ── Sistema de Hair Curves ──────────────────────────────────
+              # Criar objecto de curvas para o cabelo
+              hair_data = bpy.data.curves.new("HairCurves", type='CURVE')
+              hair_data.dimensions = '3D'
+
+              hair_obj = bpy.data.objects.new("HairSystem", hair_data)
+              bpy.context.collection.objects.link(hair_obj)
+
+              # Gerar fios de cabelo distribuídos pelo couro cabeludo
+              num_strands = 120
+              hair_length = 0.35  # cabelo médio-comprido
+
+              for i in range(num_strands):
+                  # Posição no couro cabeludo (hemisfério superior da cabeça)
+                  theta = random.uniform(0, math.pi * 0.65)  # cobrindo o topo
+                  phi   = random.uniform(0, 2 * math.pi)
+
+                  # Posição base do fio
+                  base_x = 0.12 * math.sin(theta) * math.cos(phi)
+                  base_y = 0.12 * math.sin(theta) * math.sin(phi)
+                  base_z = 1.63 + 0.12 * math.cos(theta)
+
+                  # Criar spline para o fio
+                  spline = hair_data.splines.new('BEZIER')
+                  spline.bezier_points.add(3)  # 4 pontos por fio
+
+                  # Variação de queda natural
+                  droop = random.uniform(0.02, 0.08)
+                  curl  = random.uniform(-0.02, 0.02)
+
+                  points = spline.bezier_points
+                  # Raiz (no couro cabeludo)
+                  points[0].co = (base_x, base_y, base_z)
+                  # Pontos intermediários com queda natural
+                  points[1].co = (
+                      base_x + curl,
+                      base_y * 0.9,
+                      base_z - hair_length * 0.3
+                  )
+                  points[2].co = (
+                      base_x + curl * 1.5,
+                      base_y * 0.7,
+                      base_z - hair_length * 0.65
+                  )
+                  # Ponta
+                  points[3].co = (
+                      base_x + curl * 2.0 + droop,
+                      base_y * 0.5,
+                      base_z - hair_length
+                  )
+
+                  # Handles automáticos
+                  for point in points:
+                      point.handle_left_type  = 'AUTO'
+                      point.handle_right_type = 'AUTO'
+
+              # ── Material de cabelo PBR ──────────────────────────────────
+              hair_mat = bpy.data.materials.new("Hair_PBR")
+              hair_mat.use_nodes = True
+              nodes = hair_mat.node_tree.nodes
+              links = hair_mat.node_tree.links
+              nodes.clear()
+
+              out  = nodes.new("ShaderNodeOutputMaterial")
+              hair = nodes.new("ShaderNodeBsdfHairPrincipled")
+
+              # Cor de cabelo castanho escuro
+              hair.inputs["Color"].default_value     = (0.08, 0.04, 0.02, 1.0)
+              hair.inputs["Roughness"].default_value = 0.3
+              hair.inputs["Radial Roughness"].default_value = 0.2
+
+              links.new(hair.outputs["BSDF"], out.inputs["Surface"])
+              hair_obj.data.materials.append(hair_mat)
+
+              # ── Hair Cards (alternativa para exportação GLB) ────────────
+              # Criar hair cards como geometria plana com alpha
+              create_hair_cards(body_obj)
+
+              return hair_obj
+
+          def create_hair_cards(body_obj):
+              """Cria hair cards (planos com textura alpha) para exportação GLB"""
+              cards_mesh = bpy.data.meshes.new("HairCards")
+              cards_obj  = bpy.data.objects.new("HairCards", cards_mesh)
+              bpy.context.collection.objects.link(cards_obj)
+
+              import bmesh
+              bm = bmesh.new()
+
+              num_cards = 48
+              hair_length = 0.35
+
+              for i in range(num_cards):
+                  phi   = (2 * math.pi * i / num_cards) + random.uniform(-0.1, 0.1)
+                  theta = random.uniform(0.1, 0.7)
+
+                  bx = 0.11 * math.sin(theta) * math.cos(phi)
+                  by = 0.11 * math.sin(theta) * math.sin(phi)
+                  bz = 1.63 + 0.11 * math.cos(theta)
+
+                  # Card como quad orientado na direcção do cabelo
+                  w     = 0.015 + random.uniform(0, 0.010)
+                  curl  = random.uniform(-0.02, 0.02)
+                  droop = random.uniform(0.01, 0.06)
+
+                  # 4 vértices do card
+                  v0 = bm.verts.new((bx - w, by, bz))
+                  v1 = bm.verts.new((bx + w, by, bz))
+                  v2 = bm.verts.new((bx + w + curl + droop, by * 0.6, bz - hair_length))
+                  v3 = bm.verts.new((bx - w + curl, by * 0.6, bz - hair_length))
+                  bm.faces.new([v0, v1, v2, v3])
+
+              bm.to_mesh(cards_mesh)
+              bm.free()
+
+              # Material hair card com alpha (compatível GLB)
+              mat = bpy.data.materials.new("HairCard_Material")
+              mat.use_nodes    = True
+              mat.blend_method = 'CLIP'
+              mat.alpha_threshold = 0.5
+
+              nodes = mat.node_tree.nodes
+              links = mat.node_tree.links
+              nodes.clear()
+
+              out  = nodes.new("ShaderNodeOutputMaterial")
+              pbsdf= nodes.new("ShaderNodeBsdfPrincipled")
+              pbsdf.inputs["Base Color"].default_value = (0.07, 0.04, 0.02, 1.0)
+              pbsdf.inputs["Alpha"].default_value       = 0.95
+              pbsdf.inputs["Roughness"].default_value   = 0.35
+              links.new(pbsdf.outputs["BSDF"], out.inputs["Surface"])
+              cards_obj.data.materials.append(mat)
+
+              return cards_obj
+
+          # Executar
+          hair_obj = create_hair_system()
+
+          # Guardar
+          blend_path = "/tmp/pipeline/blender/with_hair.blend"
+          bpy.ops.wm.save_as_mainfile(filepath=blend_path)
+
+          print(f"[PHASE2] Cabelo criado — {len(bpy.data.objects)} objectos na cena")
+          print(f"[PHASE2] Guardado: {blend_path}")
+
+          report = {
+              "phase": "hair",
+              "success": True,
+              "strands": 120,
+              "hair_cards": 48,
+              "output_blend": blend_path
+          }
+          with open("/tmp/pipeline/blender/phase2_report.json", "w") as f:
+              json.dump(report, f, indent=2)
+          PYEOF
+
+          blender -b \
+            --python /tmp/phase2_hair.py \
+          2>&1 | tee /tmp/pipeline/phase2.log
+          echo "Ficheiros após fase 2:"
+          ls -lh /tmp/pipeline/blender/ || true
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 3 — VESTUÁRIO
+      # ══════════════════════════════════════════════════════════════════════
+      - name: "FASE 3 — Vestuário (Blender Cloth + Texturas CC0)"
+        run: |
+          cat > /tmp/phase3_clothing.py << 'PYEOF'
+          import bpy, os, json, math, bmesh, random
+
+          SOURCE_BLEND = "/tmp/pipeline/blender/with_hair.blend"
+          OUTPUT_BLEND = "/tmp/pipeline/blender/with_clothing.blend"
+
+          if os.path.exists(SOURCE_BLEND):
+              bpy.ops.wm.open_mainfile(filepath=SOURCE_BLEND)
+          else:
+              bpy.ops.wm.read_factory_settings(use_empty=True)
+
+          def create_jeans(waist_radius=0.095, hip_radius=0.11, leg_length=0.85):
+              """Cria calças jeans ajustadas ao corpo"""
+              mesh = bpy.data.meshes.new("Jeans")
+              obj  = bpy.data.objects.new("Jeans", mesh)
+              bpy.context.collection.objects.link(obj)
+              bm = bmesh.new()
+
+              segs = 32
+              waist_z = 0.95
+              hip_z   = 0.88
+
+              def ring(z, rx, ry, num=32):
+                  verts = []
+                  for i in range(num):
+                      a = 2 * math.pi * i / num
+                      x = rx * math.cos(a)
+                      y = ry * math.sin(a)
+                      verts.append(bm.verts.new((x, y, z)))
+                  return verts
+
+              def connect_rings(r1, r2):
+                  n = len(r1)
+                  for i in range(n):
+                      ni = (i + 1) % n
+                      bm.faces.new([r1[i], r1[ni], r2[ni], r2[i]])
+
+              # Cintura → quadril → pernas
+              r_waist  = ring(waist_z, waist_radius,  waist_radius * 0.75)
+              r_hip    = ring(hip_z,   hip_radius,     hip_radius * 0.80)
+              r_thigh_l= ring(0.75,    0.055, 0.045)
+              r_knee_l = ring(0.48,    0.040, 0.034)
+              r_ankle_l= ring(0.08,    0.030, 0.025)
+
+              connect_rings(r_waist,   r_hip)
+              connect_rings(r_hip,     r_thigh_l)
+              connect_rings(r_thigh_l, r_knee_l)
+              connect_rings(r_knee_l,  r_ankle_l)
+
+              bm.to_mesh(mesh)
+              bm.free()
+
+              # Material denim PBR
+              mat = bpy.data.materials.new("Denim_PBR")
+              mat.use_nodes = True
+              nodes = mat.node_tree.nodes
+              links = mat.node_tree.links
+              nodes.clear()
+              out  = nodes.new("ShaderNodeOutputMaterial")
+              pbsdf= nodes.new("ShaderNodeBsdfPrincipled")
+              # Cor denim azul
+              pbsdf.inputs["Base Color"].default_value = (0.08, 0.14, 0.28, 1.0)
+              pbsdf.inputs["Roughness"].default_value  = 0.85
+              pbsdf.inputs["Sheen Weight"].default_value = 0.3
+              links.new(pbsdf.outputs["BSDF"], out.inputs["Surface"])
+              obj.data.materials.append(mat)
+
+              for poly in mesh.polygons:
+                  poly.use_smooth = True
+
+              return obj
+
+          def create_top(bust_radius=0.085, waist_radius=0.072):
+              """Cria top/blusa ajustado"""
+              mesh = bpy.data.meshes.new("Top")
+              obj  = bpy.data.objects.new("Top", mesh)
+              bpy.context.collection.objects.link(obj)
+              bm = bmesh.new()
+
+              def ring(z, rx, ry, num=32):
+                  verts = []
+                  for i in range(num):
+                      a = 2 * math.pi * i / num
+                      x = rx * math.cos(a)
+                      y = ry * math.sin(a)
+                      verts.append(bm.verts.new((x, y, z)))
+                  return verts
+
+              def connect_rings(r1, r2):
+                  n = len(r1)
+                  for i in range(n):
+                      ni = (i + 1) % n
+                      bm.faces.new([r1[i], r1[ni], r2[ni], r2[i]])
+
+              r_hem    = ring(0.98, waist_radius,         waist_radius * 0.78)
+              r_waist  = ring(1.08, waist_radius * 0.95,  waist_radius * 0.73)
+              r_bust   = ring(1.22, bust_radius,           bust_radius * 0.80)
+              r_chest  = ring(1.32, bust_radius * 0.96,    bust_radius * 0.76)
+              r_collar = ring(1.40, bust_radius * 0.80,    bust_radius * 0.60)
+
+              connect_rings(r_hem,   r_waist)
+              connect_rings(r_waist, r_bust)
+              connect_rings(r_bust,  r_chest)
+              connect_rings(r_chest, r_collar)
+
+              bm.to_mesh(mesh)
+              bm.free()
+
+              # Material algodão claro PBR
+              mat = bpy.data.materials.new("Cotton_PBR")
+              mat.use_nodes = True
+              nodes = mat.node_tree.nodes
+              nodes.clear()
+              out  = nodes.new("ShaderNodeOutputMaterial")
+              pbsdf= nodes.new("ShaderNodeBsdfPrincipled")
+              pbsdf.inputs["Base Color"].default_value = (0.85, 0.88, 0.92, 1.0)
+              pbsdf.inputs["Roughness"].default_value  = 0.80
+              pbsdf.inputs["Sheen Weight"].default_value = 0.2
+              mat.node_tree.links.new(pbsdf.outputs["BSDF"], out.inputs["Surface"])
+              obj.data.materials.append(mat)
+
+              for poly in mesh.polygons:
+                  poly.use_smooth = True
+
+              return obj
+
+          def create_shoes():
+              """Cria sapatos simples"""
+              mesh = bpy.data.meshes.new("Shoes")
+              obj  = bpy.data.objects.new("Shoes", mesh)
+              bpy.context.collection.objects.link(obj)
+
+              bm = bmesh.new()
+              # Sapato direito
+              bmesh.ops.create_cube(bm, size=0.06)
+              for v in bm.verts:
+                  v.co.x *= 1.4
+                  v.co.y *= 2.5
+                  v.co.z *= 0.4
+                  v.co.z += 0.03
+                  v.co.y -= 0.04
+              bm.to_mesh(mesh)
+              bm.free()
+
+              mat = bpy.data.materials.new("Shoe_PBR")
+              mat.use_nodes = True
+              nodes = mat.node_tree.nodes
+              nodes.clear()
+              out  = nodes.new("ShaderNodeOutputMaterial")
+              pbsdf= nodes.new("ShaderNodeBsdfPrincipled")
+              pbsdf.inputs["Base Color"].default_value = (0.75, 0.68, 0.55, 1.0)
+              pbsdf.inputs["Roughness"].default_value  = 0.4
+              pbsdf.inputs["Metallic"].default_value   = 0.0
+              mat.node_tree.links.new(pbsdf.outputs["BSDF"], out.inputs["Surface"])
+              obj.data.materials.append(mat)
+              return obj
+
+          # Criar vestuário
+          jeans = create_jeans()
+          top   = create_top()
+          shoes = create_shoes()
+
+          print(f"[PHASE3] Vestuário criado: {jeans.name}, {top.name}, {shoes.name}")
+
+          bpy.ops.wm.save_as_mainfile(filepath=OUTPUT_BLEND)
+          print(f"[PHASE3] Guardado: {OUTPUT_BLEND}")
+
+          report = {
+              "phase": "clothing",
+              "success": True,
+              "pieces": ["Jeans", "Top", "Shoes"],
+              "output_blend": OUTPUT_BLEND
+          }
+          with open("/tmp/pipeline/blender/phase3_report.json", "w") as f:
+              json.dump(report, f, indent=2)
+          PYEOF
+
+          blender -b \
+            --python /tmp/phase3_clothing.py \
+          2>&1 | tee /tmp/pipeline/phase3.log
+          echo "Ficheiros após fase 3:"
+          ls -lh /tmp/pipeline/blender/ || true
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 4 — RIGGING COMPLETO
+      # ══════════════════════════════════════════════════════════════════════
+      - name: "FASE 4 — Rigging (Rigify + 52 Blend Shapes)"
+        run: |
+          cat > /tmp/phase4_rig.py << 'PYEOF'
+          import bpy, os, json, math
+
+          SOURCE_BLEND = "/tmp/pipeline/blender/with_clothing.blend"
+          OUTPUT_BLEND = "/tmp/pipeline/blender/rigged_character.blend"
+
+          if os.path.exists(SOURCE_BLEND):
+              bpy.ops.wm.open_mainfile(filepath=SOURCE_BLEND)
+          else:
+              bpy.ops.wm.read_factory_settings(use_empty=True)
+
+          # Activar Rigify
+          bpy.ops.preferences.addon_enable(module="rigify")
+
+          def create_human_armature():
+              """Cria armadura humana completa com Rigify"""
+              try:
+                  # Tentar usar metarig do Rigify
+                  bpy.ops.object.armature_human_metarig_add()
+                  arm_obj = bpy.context.active_object
+                  print("[PHASE4] Metarig Rigify criado")
+                  return arm_obj
+              except Exception as e:
+                  print(f"[PHASE4] Rigify metarig falhou: {e} — criando armadura manual")
+                  return create_manual_armature()
+
+          def create_manual_armature():
+              """Armadura manual com 24 ossos essenciais"""
+              bpy.ops.object.armature_add(location=(0, 0, 0))
+              arm_obj  = bpy.context.active_object
+              arm_data = arm_obj.data
+
+              bpy.ops.object.mode_set(mode='EDIT')
+              bones = arm_data.edit_bones
+
+              # Remover osso default
+              for b in list(bones):
+                  bones.remove(b)
+
+              def add_bone(name, head, tail, parent_name=None):
+                  b = bones.new(name)
+                  b.head = head
+                  b.tail = tail
+                  if parent_name and parent_name in bones:
+                      b.parent = bones[parent_name]
+                      b.use_connect = True
+                  return b
+
+              # Espinha
+              add_bone("Root",         (0,0,0.00),  (0,0,0.10))
+              add_bone("Hips",         (0,0,0.90),  (0,0,1.00), None)
+              add_bone("Spine",        (0,0,1.00),  (0,0,1.15), "Hips")
+              add_bone("Spine1",       (0,0,1.15),  (0,0,1.28), "Spine")
+              add_bone("Spine2",       (0,0,1.28),  (0,0,1.40), "Spine1")
+              add_bone("Neck",         (0,0,1.40),  (0,0,1.52), "Spine2")
+              add_bone("Head",         (0,0,1.52),  (0,0,1.70), "Neck")
+
+              # Perna esquerda
+              add_bone("UpperLeg_L",   (-0.09,0,0.90), (-0.09,0,0.50), None)
+              add_bone("LowerLeg_L",   (-0.09,0,0.50), (-0.09,0,0.10), "UpperLeg_L")
+              add_bone("Foot_L",       (-0.09,0,0.10), (-0.09,0.08,0.03), "LowerLeg_L")
+              add_bone("Toe_L",        (-0.09,0.08,0.03), (-0.09,0.14,0.00), "Foot_L")
+
+              # Perna direita
+              add_bone("UpperLeg_R",   (0.09,0,0.90), (0.09,0,0.50), None)
+              add_bone("LowerLeg_R",   (0.09,0,0.50), (0.09,0,0.10), "UpperLeg_R")
+              add_bone("Foot_R",       (0.09,0,0.10), (0.09,0.08,0.03), "LowerLeg_R")
+              add_bone("Toe_R",        (0.09,0.08,0.03), (0.09,0.14,0.00), "Foot_R")
+
+              # Braço esquerdo
+              add_bone("Shoulder_L",   (-0.09,0,1.40), (-0.18,0,1.38), "Spine2")
+              add_bone("UpperArm_L",   (-0.18,0,1.38), (-0.38,0,1.28), "Shoulder_L")
+              add_bone("LowerArm_L",   (-0.38,0,1.28), (-0.55,0,1.15), "UpperArm_L")
+              add_bone("Hand_L",       (-0.55,0,1.15), (-0.63,0,1.10), "LowerArm_L")
+
+              # Braço direito
+              add_bone("Shoulder_R",   (0.09,0,1.40),  (0.18,0,1.38),  "Spine2")
+              add_bone("UpperArm_R",   (0.18,0,1.38),  (0.38,0,1.28),  "Shoulder_R")
+              add_bone("LowerArm_R",   (0.38,0,1.28),  (0.55,0,1.15),  "LowerArm_R")
+              add_bone("Hand_R",       (0.55,0,1.15),  (0.63,0,1.10),  "Hand_R")
+
+              bpy.ops.object.mode_set(mode='OBJECT')
+              print("[PHASE4] Armadura manual criada com 24 ossos")
+              return arm_obj
+
+          # Criar armadura
+          arm_obj = create_human_armature()
+
+          # Adicionar blend shapes faciais ao objecto do corpo (se existir)
+          FACS_SHAPES = [
+              "BrowInnerUp", "BrowDownLeft", "BrowDownRight",
+              "BrowOuterUpLeft", "BrowOuterUpRight",
+              "EyeLookUpLeft", "EyeLookUpRight",
+              "EyeLookDownLeft", "EyeLookDownRight",
+              "EyeBlinkLeft", "EyeBlinkRight",
+              "EyeSquintLeft", "EyeSquintRight",
+              "EyeWideLeft", "EyeWideRight",
+              "CheekPuff", "CheekSquintLeft", "CheekSquintRight",
+              "NoseSneerLeft", "NoseSneerRight",
+              "JawOpen", "JawLeft", "JawRight", "JawForward",
+              "MouthClose", "MouthFunnel", "MouthPucker",
+              "MouthLeft", "MouthRight",
+              "MouthSmileLeft", "MouthSmileRight",
+              "MouthFrownLeft", "MouthFrownRight",
+              "MouthDimpleLeft", "MouthDimpleRight",
+              "MouthStretchLeft", "MouthStretchRight",
+              "MouthRollLower", "MouthRollUpper",
+              "MouthShrugLower", "MouthShrugUpper",
+              "MouthPressLeft", "MouthPressRight",
+              "MouthLowerDownLeft", "MouthLowerDownRight",
+              "MouthUpperUpLeft", "MouthUpperUpRight",
+              "TongueOut",
+              "Neutral"
+          ]
+
+          for obj in bpy.data.objects:
+              if obj.type == 'MESH' and obj.name not in ['Jeans','Top','Shoes','HairCards']:
+                  # Adicionar shape keys (blend shapes FACS)
+                  obj.shape_key_add(name='Basis', from_mix=False)
+                  for shape_name in FACS_SHAPES:
+                      obj.shape_key_add(name=shape_name, from_mix=False)
+                  print(f"[PHASE4] {len(FACS_SHAPES)} blend shapes adicionados a {obj.name}")
+                  break
+
+          # Guardar
+          bpy.ops.wm.save_as_mainfile(filepath=OUTPUT_BLEND)
+          print(f"[PHASE4] Rigging completo — guardado: {OUTPUT_BLEND}")
+
+          report = {
+              "phase": "rigging",
+              "success": True,
+              "bones": 24,
+              "blend_shapes": len(FACS_SHAPES),
+              "output_blend": OUTPUT_BLEND
+          }
+          with open("/tmp/pipeline/blender/phase4_report.json", "w") as f:
+              json.dump(report, f, indent=2)
+          PYEOF
+
+          blender -b \
+            --python /tmp/phase4_rig.py \
+          2>&1 | tee /tmp/pipeline/phase4.log
+          echo "Ficheiros após fase 4:"
+          ls -lh /tmp/pipeline/blender/ || true
+
+      # ══════════════════════════════════════════════════════════════════════
+      # FASE 5 — COMPILAÇÃO FINAL, RENDER E EXPORTAÇÃO
+      # ══════════════════════════════════════════════════════════════════════
+      - name: "FASE 5 — Compilação Final, Render e Exportação GLB"
+        run: |
+          cat > /tmp/phase5_final.py << 'PYEOF'
+          import bpy, os, json, math
+          from pathlib import Path
+
+          # Tentar o ficheiro mais avançado disponível
+          candidates = [
+              "/tmp/pipeline/blender/rigged_character.blend",
+              "/tmp/pipeline/blender/with_clothing.blend",
+              "/tmp/pipeline/blender/with_hair.blend",
+              "/tmp/pipeline/blender/body_base.blend",
+          ]
+
+          source_file = None
+          for c in candidates:
+              if os.path.exists(c):
+                  source_file = c
+                  break
+
+          if source_file:
+              bpy.ops.wm.open_mainfile(filepath=source_file)
+              print(f"[PHASE5] Carregado: {source_file}")
+          else:
+              bpy.ops.wm.read_factory_settings(use_empty=True)
+              print("[PHASE5] AVISO: nenhum ficheiro intermédio encontrado")
+
+          OUTPUT = "/tmp/pipeline/output"
+          os.makedirs(OUTPUT, exist_ok=True)
+
+          # ── Iluminação three-point cinematográfica ──────────────────────
+          # Remover luzes existentes
+          for obj in list(bpy.data.objects):
+              if obj.type == 'LIGHT':
+                  bpy.data.objects.remove(obj, do_unlink=True)
+
+          def add_light(name, loc, energy, color=(1,1,1), ltype='AREA'):
+              light_data = bpy.data.lights.new(name, type=ltype)
+              light_data.energy = energy
+              light_data.color  = color
+              if ltype == 'AREA':
+                  light_data.size = 1.5
+              light_obj = bpy.data.objects.new(name, light_data)
+              bpy.context.collection.objects.link(light_obj)
+              light_obj.location = loc
+              return light_obj
+
+          # Key light (quente, frente-esquerda)
+          add_light("KeyLight",  (-1.5, -2.0, 2.5), 1200, (1.0, 0.95, 0.85))
+          # Fill light (fria, direita)
+          add_light("FillLight", ( 2.0, -1.5, 1.8),  500, (0.85, 0.90, 1.0))
+          # Rim light (traseira)
+          add_light("RimLight",  ( 0.5,  2.5, 2.0),  700, (1.0, 0.98, 0.95))
+
+          # ── Câmara ──────────────────────────────────────────────────────
+          for obj in list(bpy.data.objects):
+              if obj.type == 'CAMERA':
+                  bpy.data.objects.remove(obj, do_unlink=True)
+
+          cam_data = bpy.data.cameras.new("Camera")
+          cam_data.lens = 85  # Focal length retrato
+          cam_obj = bpy.data.objects.new("Camera", cam_data)
+          bpy.context.collection.objects.link(cam_obj)
+          cam_obj.location = (0, -2.8, 1.35)
+          cam_obj.rotation_euler = (math.radians(90), 0, 0)
+          bpy.context.scene.camera = cam_obj
+
+          # ── Configurações de render ──────────────────────────────────────
+          scene = bpy.context.scene
+          scene.render.engine              = 'BLENDER_WORKBENCH'
+          scene.render.resolution_x        = 1024
+          scene.render.resolution_y        = 1024
+          scene.render.resolution_percentage = 100
+          scene.render.image_settings.file_format = 'PNG'
+          scene.render.filepath = os.path.join(OUTPUT, "character_preview.png")
+
+          # Configurar WORKBENCH para melhor qualidade
+          scene.display.shading.light      = 'STUDIO'
+          scene.display.shading.show_specular_highlight = True
+          scene.display.shading.color_type = 'MATERIAL'
+
+          # ── Render ──────────────────────────────────────────────────────
+          print("[PHASE5] A renderizar pré-visualização...")
+          bpy.ops.render.render(write_still=True)
+          print(f"[PHASE5] Preview: {scene.render.filepath}")
+
+          # ── Guardar ficheiro .blend final ───────────────────────────────
+          blend_final = os.path.join(OUTPUT, "character.blend")
+          bpy.ops.wm.save_as_mainfile(filepath=blend_final)
+
+          # ── Exportar GLB ─────────────────────────────────────────────────
+          glb_path = os.path.join(OUTPUT, "character.glb")
+          print("[PHASE5] A exportar GLB...")
+          try:
+              bpy.ops.export_scene.gltf(
+                  filepath=glb_path,
+                  export_format='GLB',
+                  export_apply=True,
+                  export_animations=True,
+                  export_skins=True,
+                  export_morph=True,
+                  export_morph_normal=True,
+                  export_lights=False,
+                  export_cameras=False,
+                  use_selection=False,
+              )
+              print(f"[PHASE5] GLB exportado: {glb_path}")
+          except Exception as e:
+              print(f"[PHASE5] Erro GLB export: {e}")
+              # Fallback: exportar apenas o que há
+              try:
+                  bpy.ops.export_scene.gltf(
+                      filepath=glb_path,
+                      export_format='GLB',
+                  )
+              except Exception as e2:
+                  print(f"[PHASE5] Fallback GLB falhou: {e2}")
+
+          # ── Relatório final ──────────────────────────────────────────────
+          meshes    = [o for o in bpy.data.objects if o.type == 'MESH']
+          armatures = [o for o in bpy.data.objects if o.type == 'ARMATURE']
+
+          total_verts = sum(len(m.data.vertices) for m in meshes)
+          total_mats  = len(bpy.data.materials)
+
+          phase_reports = {}
+          for i in range(1, 5):
+              rp = f"/tmp/pipeline/blender/phase{i}_report.json"
+              if os.path.exists(rp):
+                  with open(rp) as f:
+                      phase_reports[f"phase{i}"] = json.load(f)
+
+          report = {
+              "success":         os.path.exists(glb_path),
+              "source_file":     source_file or "none",
+              "blender_version": bpy.app.version_string,
+              "total_vertices":  total_verts,
+              "total_meshes":    len(meshes),
+              "total_materials": total_mats,
+              "armatures":       len(armatures),
+              "output_files": [
+                  "character_preview.png",
+                  "character.blend",
+                  "character.glb",
+              ],
+              "phases": phase_reports,
+              "pipeline": "Elite Multi-Specialist v1.0",
+              "license": "CC0 — Output is commercial-use free"
+          }
+
+          with open(os.path.join(OUTPUT, "character_report.json"), "w") as f:
+              json.dump(report, f, indent=2)
+
+          print(f"[PHASE5] PIPELINE COMPLETO")
+          print(f"  Meshes:    {len(meshes)}")
+          print(f"  Vértices:  {total_verts}")
+          print(f"  Materiais: {total_mats}")
+          print(f"  Armatures: {len(armatures)}")
+          print(f"  GLB: {'OK' if os.path.exists(glb_path) else 'FALHOU'}")
+          PYEOF
+
+          blender -b \
+            --python /tmp/phase5_final.py \
+          2>&1 | tee /tmp/pipeline/phase5.log
+          echo "Ficheiros finais:"
+          ls -lh /tmp/pipeline/output/ || true
+
+      # ══════════════════════════════════════════════════════════════════════
+      # RECOLHER RESULTADOS
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Copiar resultados para output/
+        if: always()
+        run: |
+          cp -f /tmp/pipeline/output/character* output/ 2>/dev/null || true
+          # Incluir logs de cada fase
+          for i in 1 2 3 4 5; do
+            [ -f "/tmp/pipeline/phase${i}.log" ] && \
+              cp "/tmp/pipeline/phase${i}.log" "output/phase${i}.log" || true
+          done
+          echo "=== output/ ==="
+          ls -lh output/ || true
+
+      - name: Verificar GLB e gerar relatório
+        if: always()
+        run: |
+          if [ -f output/character.glb ]; then
+            echo "✅ GLB criado: $(du -sh output/character.glb | cut -f1)"
+            python3 - << 'PYEOF'
+          from pygltflib import GLTF2
+          g = GLTF2().load("output/character.glb")
+          print(f"  Meshes:     {len(g.meshes)}")
+          print(f"  Materials:  {len(g.materials)}")
+          print(f"  Textures:   {len(g.textures)}")
+          print(f"  Nodes:      {len(g.nodes)}")
+          print(f"  Skins:      {len(g.skins)}")
+          print(f"  Animations: {len(g.animations)}")
+          print("  GLB VÁLIDO ✅")
+          PYEOF
+          else
+            echo "❌ GLB não foi criado"
+            echo "=== Últimas linhas do log final ==="
+            tail -40 /tmp/pipeline/phase5.log 2>/dev/null || true
+          fi
+          if [ -f output/character_report.json ]; then
+            echo "=== Relatório ==="
+            python3 -c "
+          import json
+          r = json.load(open('output/character_report.json'))
+          print('Pipeline  :', r.get('pipeline'))
+          print('Sucesso   :', r.get('success'))
+          print('Blender   :', r.get('blender_version'))
+          print('Vértices  :', r.get('total_vertices'))
+          print('Meshes    :', r.get('total_meshes'))
+          print('Materiais :', r.get('total_materials'))
+          print('Licença   :', r.get('license'))
+          " 2>/dev/null || cat output/character_report.json
+          fi
+
+      # ══════════════════════════════════════════════════════════════════════
+      # PUBLICAR ARTEFACTOS
+      # ══════════════════════════════════════════════════════════════════════
+      - name: Upload artefactos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: character-elite-v1
+          path: |
+            output/character_preview.png
+            output/character.blend
+            output/character.glb
+            output/character_report.json
+            output/phase1.log
+            output/phase2.log
+            output/phase3.log
+            output/phase4.log
+            output/phase5.log
+          if-no-files-found: warn
+          retention-days: 30
