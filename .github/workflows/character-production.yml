@@ -77,27 +77,45 @@ jobs:
           ls -lah output/ || echo "(directory empty or missing)"
           echo "=== PWD ==="
           pwd
-          echo "=== GITHUB_WORKSPACE ==="
-          echo "${{ github.workspace }}"
           echo "=== Full search for .glb ==="
           find . -name "*.glb" 2>/dev/null || echo "(no .glb found)"
-          echo "=== Full search for character_report.json ==="
+          echo "=== Full content of character_report.json ==="
           find . -name "character_report.json" -exec cat {} \; 2>/dev/null || echo "(no report found)"
 
-      # ── 7. Validar GLB com gltf_validator ────────────────────────────────
+      # ── 7. Validar GLB com gltf_validator ─────────────────────────────────
+      #
+      #  IMPORTANTE: o CLI do gltf_validator NÃO tem flag --output.
+      #  O short flag "-o" corresponde a --stdout, não a um caminho de saída.
+      #  Por omissão, o relatório é escrito automaticamente como
+      #  "<ficheiro>.report.json" ao lado do input. Passar --output faz o
+      #  parser de argumentos falhar e imprimir apenas o texto de ajuda,
+      #  com exit code 1 — foi exatamente isto que causava as falhas
+      #  anteriores, independentemente de o character.glb existir ou não.
+      #
+      #  O validator também sai com código != 0 quando encontra ERROS reais
+      #  no ficheiro (comportamento esperado): não suprimimos isso, pois a
+      #  missão exige não declarar sucesso se a validação falhar.
       - name: Validate GLB
         run: |
           GLB="output/character.glb"
-          if [ -f "$GLB" ]; then
-            gltf_validator "$GLB" \
-              --output output/character_validation.json \
-              --messages \
-              --all
-            echo "Validation complete."
-          else
+          if [ ! -f "$GLB" ]; then
             echo "ERROR: $GLB not found after generation step."
             exit 1
           fi
+
+          set +e
+          gltf_validator "$GLB" --all
+          VALIDATOR_EXIT=$?
+          set -e
+
+          # Relatório é escrito como output/character.glb.report.json por omissão
+          if [ -f "${GLB}.report.json" ]; then
+            mv "${GLB}.report.json" output/character_validation.json
+            echo "Validation report: output/character_validation.json"
+          fi
+
+          echo "gltf_validator exit code: $VALIDATOR_EXIT"
+          exit $VALIDATOR_EXIT
 
       # ── 8. Listar ficheiros gerados ───────────────────────────────────────
       - name: List generated files
