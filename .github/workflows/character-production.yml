@@ -48,13 +48,13 @@ jobs:
       - name: Verificar Blender
         run: blender --version
 
-      # ── 3. MPFB2 — clonar repositório oficial ───────────────────────────
+      # ── 3. MPFB2 ────────────────────────────────────────────────────────
       - name: Cache MPFB2
         id: cache-mpfb2
         uses: actions/cache@v4
         with:
           path: mpfb2
-          key: mpfb2-commit-${{ hashFiles('mpfb2/.git/HEAD') }}-v1
+          key: mpfb2-v2
           restore-keys: mpfb2-
 
       - name: Clonar MPFB2
@@ -64,103 +64,106 @@ jobs:
             https://github.com/makehumancommunity/mpfb2.git mpfb2
           echo "MPFB2 commit: $(git -C mpfb2 rev-parse --short HEAD)"
 
-      - name: Empacotar MPFB2 como extensão Blender
+      - name: Empacotar e instalar MPFB2 no Blender
         run: |
           cd mpfb2/src
           zip -r ../../mpfb2.zip mpfb
-          echo "ZIP: $(du -sh ../../mpfb2.zip | cut -f1)"
-
-      - name: Instalar MPFB2 no Blender
-        run: |
+          echo "ZIP gerado: $(du -sh ../../mpfb2.zip | cut -f1)"
+          cd ../..
           blender -b \
             --command extension install-file \
             -r user_default \
-            -e "${{ github.workspace }}/mpfb2.zip"
-          echo "MPFB2 instalado"
+            -e "${{ github.workspace }}/mpfb2.zip" 2>&1 | tee /tmp/mpfb2_install.log
+          echo "--- Últimas linhas do log de instalação ---"
+          tail -20 /tmp/mpfb2_install.log
 
-      # ── 4. MAKEHUMAN SYSTEM ASSETS (pele, olhos, dentes, cabelo) ────────
+      # ── 4. VERIFICAR INSTALAÇÃO DO MPFB2 ────────────────────────────────
+      - name: Verificar MPFB2 instalado
+        run: |
+          blender -b --python-expr "
+          import sys
+          try:
+              import mpfb
+              print('MPFB2 importado OK:', mpfb.__file__)
+          except ImportError as e:
+              print('MPFB2 NAO disponivel como import direto:', e)
+          # Verificar via addons
+          import bpy
+          addons = list(bpy.context.preferences.addons.keys())
+          print('Addons ativos:', addons[:10])
+          " 2>&1 | tail -20
+
+      # ── 5. MAKEHUMAN SYSTEM ASSETS ──────────────────────────────────────
       - name: Cache MakeHuman system assets
         id: cache-mh-assets
         uses: actions/cache@v4
         with:
           path: mh_assets
-          key: mh-system-assets-v3
+          key: mh-system-assets-v4
 
       - name: Descarregar MakeHuman system assets
         if: steps.cache-mh-assets.outputs.cache-hit != 'true'
         run: |
           mkdir -p mh_assets
-          BASE="http://download.tuxfamily.org/makehuman/assets"
+          # URL oficial dos assets do MakeHuman Community
+          curl -L --max-time 60 -o mh_assets/makehuman-system-assets.zip \
+            "http://download.tuxfamily.org/makehuman/assets/makehuman-system-assets.zip" \
+            2>/dev/null && echo "Assets descarregados" \
+            || echo "AVISO: assets nao disponiveis (continuando sem eles)"
+          ls -lh mh_assets/ || true
 
-          # System assets — pacote principal com pele, olhos, dentes, cabelo
-          curl -L -o mh_assets/makehuman-system-assets.zip \
-            "${BASE}/makehuman-system-assets.zip" 2>/dev/null || \
-          curl -L -o mh_assets/makehuman-system-assets.zip \
-            "https://github.com/makehumancommunity/makehuman-assets/releases/download/v1.0.0/makehuman-system-assets.zip" 2>/dev/null || \
-          echo "AVISO: system assets não descarregados — tentativa via MPFB2"
-
-          ls -lh mh_assets/ 2>/dev/null || true
-
-      - name: Instalar system assets no MPFB2
-        run: |
-          # Localizar diretório de extensões do Blender 4.2
-          BLENDER_EXT=$(blender -b --python-expr "
-          import bpy, pathlib
-          print(str(pathlib.Path(bpy.utils.user_resource('EXTENSIONS'))))
-          " 2>/dev/null | tail -1)
-
-          echo "Extensions dir: $BLENDER_EXT"
-
-          MPFB_DIR="${BLENDER_EXT}/user_default/mpfb"
-          ASSET_DIR="${MPFB_DIR}/data/packs"
-
-          if [ -d "$MPFB_DIR" ]; then
-            mkdir -p "$ASSET_DIR"
-            for f in mh_assets/*.zip; do
-              [ -f "$f" ] || continue
-              echo "Instalar: $f"
-              blender -b --python-expr "
-          import bpy
-          bpy.ops.preferences.addon_enable(module='mpfb')
-          " 2>/dev/null || true
-              cp "$f" "$ASSET_DIR/" 2>/dev/null || true
-            done
-            echo "Assets copiados"
-          else
-            echo "AVISO: diretório MPFB2 não encontrado em $MPFB_DIR"
-          fi
-
-      # ── 5. INSTALAR pygltflib (validador) ───────────────────────────────
+      # ── 6. INSTALAR pygltflib ────────────────────────────────────────────
       - name: Instalar pygltflib
         run: pip install --quiet pygltflib
 
-      # ── 6. GERAR PERSONAGEM COM MPFB2 + BLENDER ─────────────────────────
+      # ── 7. GERAR PERSONAGEM ──────────────────────────────────────────────
       - name: Criar diretório de saída
         run: mkdir -p output
 
-      - name: Gerar personagem com MPFB2
+      - name: Gerar personagem com Blender
         env:
           OUTPUT_DIR: ${{ github.workspace }}/output
           MPFB2_DIR:  ${{ github.workspace }}/mpfb2
           MH_ASSETS:  ${{ github.workspace }}/mh_assets
         run: |
+          echo "=== A iniciar Blender ==="
+          # Redirecionar stdout+stderr para log E para o terminal ao mesmo tempo
           blender -b \
             --python scripts/generate_character.py \
             -- \
             --output "${{ github.workspace }}/output" \
-            --assets "${{ github.workspace }}/mh_assets"
+            --assets "${{ github.workspace }}/mh_assets" \
+            2>&1 | tee output/blender_full.log
+          BLENDER_EXIT=${PIPESTATUS[0]}
+          echo "=== Blender terminou com código: $BLENDER_EXIT ==="
 
-      # ── 7. VERIFICAR RESULTADOS ──────────────────────────────────────────
+          echo ""
+          echo "=== Ficheiros produzidos ==="
+          ls -lh output/ 2>/dev/null || echo "(output vazio)"
+
+          # Verificar se o GLB foi criado — falhar aqui com log claro
+          if [ ! -f "output/character.glb" ]; then
+            echo ""
+            echo "=== ERRO: character.glb NAO FOI CRIADO ==="
+            echo "=== Últimas 60 linhas do log do Blender ==="
+            tail -60 output/blender_full.log
+            exit 1
+          fi
+
+          echo "GLB criado: $(du -sh output/character.glb | cut -f1)"
+
+      # ── 8. VERIFICAR RESULTADOS ──────────────────────────────────────────
       - name: Verificar resultados
         if: always()
         run: |
           echo "=== Ficheiros em output/ ==="
           ls -lh output/ 2>/dev/null || echo "(vazio)"
-          echo ""
+
           if [ -f output/character_report.json ]; then
+            echo ""
             echo "=== Relatório ==="
             python3 -c "
-          import json, sys
+          import json
           r = json.load(open('output/character_report.json'))
           print('Status     :', 'OK' if r.get('success') else 'FALHOU')
           print('Blender    :', r.get('blender_version','?'))
@@ -168,25 +171,27 @@ jobs:
           print('Gerador    :', r.get('generator','?'))
           print('Vértices   :', r.get('vertices','?'))
           print('Materiais  :', r.get('materials','?'))
+          print('MPFB2 ativo:', r.get('mpfb2_active','?'))
           print('Ficheiros  :', r.get('output_files',[]))
           if r.get('errors'):   print('Erros:', r['errors'])
           if r.get('warnings'): print('Avisos:', r['warnings'])
           " 2>/dev/null || cat output/character_report.json
           fi
 
-      # ── 8. VALIDAR GLB ───────────────────────────────────────────────────
-      - name: Validar GLB com pygltflib
-        run: |
-          GLB="output/character.glb"
-          if [ ! -f "$GLB" ]; then
-            echo "ERRO: $GLB não encontrado"
-            exit 1
+          if [ -f output/blender_full.log ]; then
+            echo ""
+            echo "=== Erros/avisos no log do Blender ==="
+            grep -i "error\|traceback\|exception\|warning\|failed\|not found" \
+              output/blender_full.log | head -40 || echo "(nenhum erro encontrado)"
           fi
-          echo "GLB encontrado: $(du -sh $GLB | cut -f1)"
+
+      # ── 9. VALIDAR GLB ───────────────────────────────────────────────────
+      - name: Validar GLB com pygltflib
+        if: success()
+        run: |
+          echo "GLB: $(du -sh output/character.glb | cut -f1)"
           python3 - <<'PYEOF'
           from pygltflib import GLTF2
-          import sys
-
           glb = GLTF2().load("output/character.glb")
           print(f"Meshes      : {len(glb.meshes)}")
           print(f"Materials   : {len(glb.materials)}")
@@ -194,11 +199,12 @@ jobs:
           print(f"Nodes       : {len(glb.nodes)}")
           print(f"Skins       : {len(glb.skins)}")
           print(f"Animations  : {len(glb.animations)}")
-          print("GLB VÁLIDO")
+          print("GLB VALIDO")
           PYEOF
 
-      # ── 9. PUBLICAR ARTEFACTOS ───────────────────────────────────────────
+      # ── 10. PUBLICAR ARTEFACTOS ──────────────────────────────────────────
       - name: Upload artefactos
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: character-mpfb2-v1
@@ -207,5 +213,6 @@ jobs:
             output/character.blend
             output/character.glb
             output/character_report.json
+            output/blender_full.log
           if-no-files-found: warn
           retention-days: 30
