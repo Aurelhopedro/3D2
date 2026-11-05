@@ -1,7 +1,7 @@
 name: Character Production v2 — mhcore + Blender 4.2 LTS
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ARQUITECTURA
+#  ARQUITECTURA — 3 FASES
 #  ─────────────────────────────────────────────────────────────────────────
 #  Job 1 — generate-mesh
 #    - Instala makehuman-mcp (pip install makehuman-mcp)
@@ -15,10 +15,22 @@ name: Character Production v2 — mhcore + Blender 4.2 LTS
 #    - Descarrega os ficheiros do Job 1 (download-artifact)
 #    - Instala Blender 4.2.9 LTS (com cache)
 #    - Corre scripts/pipeline.py DENTRO do Blender (blender -b --python)
-#    - Importa o FBX, aplica materiais PBR, hair cards, vestuário, iluminação
+#    - Importa o FBX, aplica materiais PBR base, hair cards, vestuário, iluminação
 #    - Exporta: character.glb + character.blend + character_preview.png
 #    - Valida o GLB com pygltflib
-#    - Publica todos os artefactos
+#    - Passa o .blend ao Job 3 via upload-artifact
+#
+#  Job 3 — refine  (needs: blender-pipeline)
+#    - Descarrega o character.blend do Job 2
+#    - Corre scripts/refine.py DENTRO do Blender
+#    - Smooth shading + Auto Smooth (elimina aspecto triangulado)
+#    - Subdivision Surface nível 1 no corpo
+#    - Materiais PBR melhorados com SSS e variação de cor por zona
+#    - Verifica / cria rig completo de 20 ossos
+#    - Olhos anatómicos completos (esclera + íris + pupila + córnea)
+#    - Iluminação four-point cinematográfica melhorada
+#    - Exporta: character_final.glb + character_final.blend + preview final
+#    - Valida e publica todos os artefactos finais
 # ══════════════════════════════════════════════════════════════════════════════
 
 on:
@@ -28,6 +40,7 @@ on:
     paths:
       - "scripts/generate.py"
       - "scripts/pipeline.py"
+      - "scripts/refine.py"
       - ".github/workflows/character-production-v2.yml"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -37,7 +50,7 @@ jobs:
   generate-mesh:
     name: "Fase 1 — Gerar mesh (mhcore)"
     runs-on: ubuntu-latest
-    timeout-minutes: 40   # primeira run descarrega ~430 MB de dados
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
@@ -55,11 +68,7 @@ jobs:
           key: pip-mhcore-${{ runner.os }}-v1
           restore-keys: pip-mhcore-${{ runner.os }}-
 
-      # Cache dos dados do mhcore (~430 MB).
-      # O mhcore guarda em ~/.cache/mhcore por defeito — não passamos
-      # MHCORE_DATA para não interferir com o bootstrap automático.
       - name: Cache dados mhcore
-        id: cache-mhcore-data
         uses: actions/cache@v4
         with:
           path: ~/.cache/mhcore
@@ -73,8 +82,6 @@ jobs:
       - name: Criar directório de saída
         run: mkdir -p output
 
-      # Sem MHCORE_DATA — mhcore usa ~/.cache/mhcore e descarrega os dados
-      # automaticamente na primeira importação se o cache não existir.
       - name: Gerar personagem (Fase 1)
         run: |
           echo "=== A iniciar generate.py ==="
@@ -187,10 +194,8 @@ jobs:
 
           if [ -f output/character.fbx ]; then
             INPUT="${{ github.workspace }}/output/character.fbx"
-            echo "Entrada: FBX"
           elif [ -f output/character.obj ]; then
             INPUT="${{ github.workspace }}/output/character.obj"
-            echo "Entrada: OBJ (fallback)"
           else
             echo "ERRO: Sem ficheiro de entrada para o Blender"
             exit 1
@@ -205,67 +210,216 @@ jobs:
 
           BLENDER_EXIT=${PIPESTATUS[0]}
           echo "=== Blender terminou com código: $BLENDER_EXIT ==="
-          echo ""
-          echo "=== Ficheiros produzidos ==="
           ls -lh output/
 
           if [ ! -f output/character.glb ]; then
-            echo ""
             echo "=== ERRO: character.glb não foi criado ==="
             tail -60 output/blender_pipeline.log
             exit 1
           fi
 
-          echo "GLB: $(du -sh output/character.glb | cut -f1)"
+          # Verificar que o .blend também foi produzido (necessário para Fase 3)
+          if [ ! -f output/character.blend ]; then
+            echo "AVISO: character.blend não encontrado — Fase 3 vai usar o GLB"
+          fi
 
       - name: Verificar resultados
         if: always()
         run: |
-          echo "=== Ficheiros finais ==="
           ls -lh output/ 2>/dev/null || echo "(vazio)"
-
           for rep in output/pipeline_report.json output/generate_report.json; do
             if [ -f "$rep" ]; then
-              echo ""
               echo "=== $(basename $rep) ==="
               python3 -c "
           import json
           r = json.load(open('$rep'))
           print('Status    :', 'OK' if r.get('success') else 'FALHOU')
-          print('Fase      :', r.get('phase','?'))
-          for k in ('blender','mhcore_version','vertices','meshes','materials','hair_cards'):
+          for k in ('blender','vertices','meshes','materials','hair_cards'):
               if k in r: print(f'{k:12}: {r[k]}')
-          print('Ficheiros :', r.get('output_files',[]))
           if r.get('errors'): print('Erros:', r['errors'])
-          " 2>/dev/null || cat "$rep"
+          " 2>/dev/null || true
             fi
           done
 
-          if [ -f output/blender_pipeline.log ]; then
-            echo ""
-            echo "=== Erros no log do Blender ==="
-            grep -i "error\|traceback\|exception\|failed" \
-              output/blender_pipeline.log | head -30 || echo "(sem erros)"
+      - name: Validar GLB Fase 2
+        if: success()
+        run: |
+          python3 - <<'PYEOF'
+          from pygltflib import GLTF2
+          from pathlib import Path
+          glb = GLTF2().load("output/character.glb")
+          kb  = Path("output/character.glb").stat().st_size // 1024
+          print(f"GLB Fase 2 válido — {kb} KB | meshes={len(glb.meshes)} "
+                f"mats={len(glb.materials)} skins={len(glb.skins)}")
+          PYEOF
+
+      # Passa o .blend (e o .glb como fallback) para o Job 3
+      - name: Upload artefactos para Fase 3
+        uses: actions/upload-artifact@v4
+        with:
+          name: fase2-blend
+          path: |
+            output/character.blend
+            output/character.glb
+            output/character.mhm
+            output/pipeline_report.json
+          if-no-files-found: warn
+          retention-days: 1
+
+      # Artefactos intermédios para debug
+      - name: Upload artefactos de debug Fase 2
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fase2-debug-${{ github.run_number }}
+          path: |
+            output/character_preview.png
+            output/blender_pipeline.log
+            output/generate.log
+          if-no-files-found: warn
+          retention-days: 7
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 3 — REFINE (smooth + subdivision + materiais + rig + olhos + GLB final)
+# ─────────────────────────────────────────────────────────────────────────────
+  refine:
+    name: "Fase 3 — Refinamento final"
+    needs: blender-pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Instalar dependências headless
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxi6 libxxf86vm1 \
+            libxfixes3 libxrender1 libxkbcommon0 libsm6 \
+            curl xz-utils python3-pip
+
+      # Reutilizar o mesmo Blender do Job 2 (mesma chave de cache)
+      - name: Cache Blender
+        id: cache-blender
+        uses: actions/cache@v4
+        with:
+          path: blender-4.2.9-linux-x64
+          key: blender-4.2.9-linux-x64-v1
+
+      - name: Descarregar Blender 4.2.9 LTS
+        if: steps.cache-blender.outputs.cache-hit != 'true'
+        run: |
+          curl -L --max-time 300 -o blender.tar.xz \
+            "https://download.blender.org/release/Blender4.2/blender-4.2.9-linux-x64.tar.xz"
+          tar -xf blender.tar.xz
+          rm blender.tar.xz
+
+      - name: Adicionar Blender ao PATH
+        run: echo "${{ github.workspace }}/blender-4.2.9-linux-x64" >> $GITHUB_PATH
+
+      - name: Verificar Blender
+        run: blender --version
+
+      - name: Instalar pygltflib
+        run: pip install --quiet pygltflib
+
+      # Descarregar o .blend produzido pela Fase 2
+      - name: Download artefactos da Fase 2
+        uses: actions/download-artifact@v4
+        with:
+          name: fase2-blend
+          path: output
+
+      - name: Verificar ficheiros recebidos da Fase 2
+        run: |
+          echo "=== Ficheiros da Fase 2 ==="
+          ls -lh output/
+
+      - name: Executar refine (Fase 3)
+        run: |
+          echo "=== A iniciar refine.py ==="
+
+          # Preferir .blend; fallback para .glb
+          if [ -f output/character.blend ]; then
+            INPUT="${{ github.workspace }}/output/character.blend"
+            echo "Entrada: character.blend"
+          elif [ -f output/character.glb ]; then
+            INPUT="${{ github.workspace }}/output/character.glb"
+            echo "Entrada: character.glb (fallback)"
+          else
+            echo "ERRO: Sem ficheiro de entrada para a Fase 3"
+            exit 1
           fi
 
-      - name: Validar GLB (pygltflib)
+          blender -b \
+            --python scripts/refine.py \
+            -- \
+            --input  "$INPUT" \
+            --output "${{ github.workspace }}/output" \
+            2>&1 | tee output/blender_refine.log
+
+          BLENDER_EXIT=${PIPESTATUS[0]}
+          echo ""
+          echo "=== Blender Fase 3 terminou com código: $BLENDER_EXIT ==="
+          echo ""
+          echo "=== Ficheiros produzidos ==="
+          ls -lh output/
+
+          if [ ! -f output/character_final.glb ]; then
+            echo "=== ERRO: character_final.glb não foi criado ==="
+            tail -60 output/blender_refine.log
+            exit 1
+          fi
+
+          echo ""
+          echo "GLB final: $(du -sh output/character_final.glb | cut -f1)"
+
+      - name: Relatório Fase 3
+        if: always()
+        run: |
+          if [ -f output/refine_report.json ]; then
+            python3 -c "
+          import json
+          r = json.load(open('output/refine_report.json'))
+          print('Status    :', 'OK' if r.get('success') else 'FALHOU')
+          print('Blender   :', r.get('blender','?'))
+          for k in ('meshes','vertices','materials','rig_bones','rig_source'):
+              if k in r: print(f'{k:12}: {r[k]}')
+          print('Passos    :', r.get('steps',[]))
+          print('Ficheiros :', r.get('output_files',[]))
+          if r.get('warnings'): print('Avisos:', len(r['warnings']))
+          if r.get('errors'):   print('Erros:', r['errors'])
+          "
+          fi
+
+          if [ -f output/blender_refine.log ]; then
+            echo ""
+            echo "=== Erros no log da Fase 3 ==="
+            grep -i "error\|traceback\|exception" \
+              output/blender_refine.log | grep -v "^Info:" | head -30 \
+              || echo "(sem erros)"
+          fi
+
+      - name: Validar GLB final (pygltflib)
         if: success()
         run: |
           python3 - <<'PYEOF'
           from pygltflib import GLTF2
           from pathlib import Path
 
-          glb_path = "output/character.glb"
+          glb_path = "output/character_final.glb"
           if not Path(glb_path).exists():
-              print("GLB não encontrado")
+              print("character_final.glb não encontrado")
               exit(1)
 
-          glb = GLTF2().load(glb_path)
+          glb     = GLTF2().load(glb_path)
           size_kb = Path(glb_path).stat().st_size // 1024
 
-          print("=" * 50)
-          print("GLB VÁLIDO")
-          print("=" * 50)
+          print("=" * 55)
+          print("CHARACTER_FINAL.GLB — VALIDADO")
+          print("=" * 55)
           print(f"  Tamanho   : {size_kb} KB")
           print(f"  Meshes    : {len(glb.meshes)}")
           print(f"  Materiais : {len(glb.materials)}")
@@ -273,22 +427,37 @@ jobs:
           print(f"  Nós       : {len(glb.nodes)}")
           print(f"  Skins     : {len(glb.skins)}")
           print(f"  Animações : {len(glb.animations)}")
-          print("=" * 50)
+          print("=" * 55)
+
+          # Verificações de qualidade
+          assert len(glb.meshes) > 0,     "Sem meshes no GLB!"
+          assert len(glb.materials) > 0,  "Sem materiais no GLB!"
+          print("Todas as verificações passaram.")
           PYEOF
 
-      - name: Upload artefactos finais
+      # Publicar produto final
+      - name: Upload produto final
+        uses: actions/upload-artifact@v4
+        with:
+          name: character-FINAL-${{ github.run_number }}
+          path: |
+            output/character_final.glb
+            output/character_final.blend
+            output/character_final_preview.png
+            output/refine_report.json
+            output/pipeline_report.json
+            output/generate_report.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      # Log completo para debug
+      - name: Upload logs Fase 3
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: character-v2-${{ github.run_number }}
+          name: fase3-logs-${{ github.run_number }}
           path: |
-            output/character_preview.png
-            output/character.blend
-            output/character.glb
-            output/character.mhm
-            output/pipeline_report.json
-            output/generate_report.json
+            output/blender_refine.log
             output/blender_pipeline.log
-            output/generate.log
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 7
