@@ -1,12 +1,11 @@
-name: Character Production — MPFB2 + Blender 4.2 LTS
+name: Character Production — MPFB2 + Blender 4.2 LTS (LEGADO)
+
+# NOTA: Este é o workflow legado com MPFB2.
+# Para novos runs, usar character-production-v2.yml
+# Push desactivado para evitar conflitos — usar workflow_dispatch manualmente.
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main, master]
-    paths:
-      - 'scripts/**'
-      - '.github/workflows/character-production.yml'
 
 jobs:
   generate-character:
@@ -17,7 +16,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 1. DEPENDÊNCIAS SISTEMA ──────────────────────────────────────────
       - name: Instalar dependências headless
         run: |
           sudo apt-get update -qq
@@ -26,7 +24,6 @@ jobs:
             libxfixes3 libxrender1 libxkbcommon0 libsm6 \
             curl xz-utils unzip python3-pip git
 
-      # ── 2. BLENDER 4.2.9 LTS ────────────────────────────────────────────
       - name: Cache Blender
         id: cache-blender
         uses: actions/cache@v4
@@ -48,7 +45,6 @@ jobs:
       - name: Verificar Blender
         run: blender --version
 
-      # ── 3. MPFB2 ────────────────────────────────────────────────────────
       - name: Cache MPFB2
         id: cache-mpfb2
         uses: actions/cache@v4
@@ -60,6 +56,8 @@ jobs:
       - name: Clonar MPFB2
         if: steps.cache-mpfb2.outputs.cache-hit != 'true'
         run: |
+          # Remover directório se existir (evita erro "already exists")
+          rm -rf mpfb2
           git clone --depth 1 \
             https://github.com/makehumancommunity/mpfb2.git mpfb2
           echo "MPFB2 commit: $(git -C mpfb2 rev-parse --short HEAD)"
@@ -74,26 +72,16 @@ jobs:
             --command extension install-file \
             -r user_default \
             -e "${{ github.workspace }}/mpfb2.zip" 2>&1 | tee /tmp/mpfb2_install.log
-          echo "--- Últimas linhas do log de instalação ---"
           tail -20 /tmp/mpfb2_install.log
 
-      # ── 4. VERIFICAR INSTALAÇÃO DO MPFB2 ────────────────────────────────
       - name: Verificar MPFB2 instalado
         run: |
           blender -b --python-expr "
-          import sys
-          try:
-              import mpfb
-              print('MPFB2 importado OK:', mpfb.__file__)
-          except ImportError as e:
-              print('MPFB2 NAO disponivel como import direto:', e)
-          # Verificar via addons
           import bpy
           addons = list(bpy.context.preferences.addons.keys())
-          print('Addons ativos:', addons[:10])
+          print('Addons:', addons[:10])
           " 2>&1 | tail -20
 
-      # ── 5. MAKEHUMAN SYSTEM ASSETS ──────────────────────────────────────
       - name: Cache MakeHuman system assets
         id: cache-mh-assets
         uses: actions/cache@v4
@@ -105,18 +93,14 @@ jobs:
         if: steps.cache-mh-assets.outputs.cache-hit != 'true'
         run: |
           mkdir -p mh_assets
-          # URL oficial dos assets do MakeHuman Community
           curl -L --max-time 60 -o mh_assets/makehuman-system-assets.zip \
             "http://download.tuxfamily.org/makehuman/assets/makehuman-system-assets.zip" \
             2>/dev/null && echo "Assets descarregados" \
-            || echo "AVISO: assets nao disponiveis (continuando sem eles)"
-          ls -lh mh_assets/ || true
+            || echo "AVISO: assets nao disponiveis"
 
-      # ── 6. INSTALAR pygltflib ────────────────────────────────────────────
       - name: Instalar pygltflib
         run: pip install --quiet pygltflib
 
-      # ── 7. GERAR PERSONAGEM ──────────────────────────────────────────────
       - name: Criar diretório de saída
         run: mkdir -p output
 
@@ -126,88 +110,40 @@ jobs:
           MPFB2_DIR:  ${{ github.workspace }}/mpfb2
           MH_ASSETS:  ${{ github.workspace }}/mh_assets
         run: |
-          echo "=== A iniciar Blender ==="
-          # Redirecionar stdout+stderr para log E para o terminal ao mesmo tempo
           blender -b \
             --python scripts/generate_character.py \
             -- \
             --output "${{ github.workspace }}/output" \
             --assets "${{ github.workspace }}/mh_assets" \
             2>&1 | tee output/blender_full.log
-          BLENDER_EXIT=${PIPESTATUS[0]}
-          echo "=== Blender terminou com código: $BLENDER_EXIT ==="
 
-          echo ""
-          echo "=== Ficheiros produzidos ==="
           ls -lh output/ 2>/dev/null || echo "(output vazio)"
 
-          # Verificar se o GLB foi criado — falhar aqui com log claro
           if [ ! -f "output/character.glb" ]; then
-            echo ""
-            echo "=== ERRO: character.glb NAO FOI CRIADO ==="
-            echo "=== Últimas 60 linhas do log do Blender ==="
+            echo "ERRO: character.glb NAO FOI CRIADO"
             tail -60 output/blender_full.log
             exit 1
           fi
 
-          echo "GLB criado: $(du -sh output/character.glb | cut -f1)"
-
-      # ── 8. VERIFICAR RESULTADOS ──────────────────────────────────────────
       - name: Verificar resultados
         if: always()
         run: |
-          echo "=== Ficheiros em output/ ==="
           ls -lh output/ 2>/dev/null || echo "(vazio)"
 
-          if [ -f output/character_report.json ]; then
-            echo ""
-            echo "=== Relatório ==="
-            python3 -c "
-          import json
-          r = json.load(open('output/character_report.json'))
-          print('Status     :', 'OK' if r.get('success') else 'FALHOU')
-          print('Blender    :', r.get('blender_version','?'))
-          print('Fonte      :', r.get('body_source','?'))
-          print('Gerador    :', r.get('generator','?'))
-          print('Vértices   :', r.get('vertices','?'))
-          print('Materiais  :', r.get('materials','?'))
-          print('MPFB2 ativo:', r.get('mpfb2_active','?'))
-          print('Ficheiros  :', r.get('output_files',[]))
-          if r.get('errors'):   print('Erros:', r['errors'])
-          if r.get('warnings'): print('Avisos:', r['warnings'])
-          " 2>/dev/null || cat output/character_report.json
-          fi
-
-          if [ -f output/blender_full.log ]; then
-            echo ""
-            echo "=== Erros/avisos no log do Blender ==="
-            grep -i "error\|traceback\|exception\|warning\|failed\|not found" \
-              output/blender_full.log | head -40 || echo "(nenhum erro encontrado)"
-          fi
-
-      # ── 9. VALIDAR GLB ───────────────────────────────────────────────────
       - name: Validar GLB com pygltflib
         if: success()
         run: |
-          echo "GLB: $(du -sh output/character.glb | cut -f1)"
           python3 - <<'PYEOF'
           from pygltflib import GLTF2
           glb = GLTF2().load("output/character.glb")
-          print(f"Meshes      : {len(glb.meshes)}")
-          print(f"Materials   : {len(glb.materials)}")
-          print(f"Textures    : {len(glb.textures)}")
-          print(f"Nodes       : {len(glb.nodes)}")
-          print(f"Skins       : {len(glb.skins)}")
-          print(f"Animations  : {len(glb.animations)}")
-          print("GLB VALIDO")
+          print(f"Meshes: {len(glb.meshes)} | Skins: {len(glb.skins)} | Mats: {len(glb.materials)}")
           PYEOF
 
-      # ── 10. PUBLICAR ARTEFACTOS ──────────────────────────────────────────
       - name: Upload artefactos
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: character-mpfb2-v1
+          name: character-mpfb2-legado
           path: |
             output/character_preview.png
             output/character.blend
