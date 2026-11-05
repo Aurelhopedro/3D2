@@ -6,6 +6,8 @@ name: Character Production v2 — mhcore + Blender 4.2 LTS
 #  Job 1 — generate-mesh
 #    - Instala makehuman-mcp (pip install makehuman-mcp)
 #    - Corre scripts/generate.py (Python puro, SEM Blender, SEM OpenGL)
+#    - Na primeira execução, mhcore descarrega ~430 MB de dados para
+#      ~/.cache/mhcore automaticamente (ficam em cache para runs futuras)
 #    - Produz: character.fbx + character.mhm + generate_report.json
 #    - Passa os ficheiros ao Job 2 via upload-artifact
 #
@@ -35,33 +37,33 @@ jobs:
   generate-mesh:
     name: "Fase 1 — Gerar mesh (mhcore)"
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40   # primeira run descarrega ~430 MB de dados
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Python 3.11 — versão estável com boa compatibilidade numpy
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # Cache do pip para acelerar reinstalações
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-mhcore-${{ runner.os }}-${{ hashFiles('**/requirements*.txt') }}
+          key: pip-mhcore-${{ runner.os }}-v1
           restore-keys: pip-mhcore-${{ runner.os }}-
 
-      # Cache dos dados do mhcore (~430 MB, descarregados uma vez)
+      # Cache dos dados do mhcore (~430 MB).
+      # O mhcore guarda em ~/.cache/mhcore por defeito — não passamos
+      # MHCORE_DATA para não interferir com o bootstrap automático.
       - name: Cache dados mhcore
         id: cache-mhcore-data
         uses: actions/cache@v4
         with:
           path: ~/.cache/mhcore
-          key: mhcore-data-v1
+          key: mhcore-data-v2
 
       - name: Instalar makehuman-mcp
         run: |
@@ -71,10 +73,9 @@ jobs:
       - name: Criar directório de saída
         run: mkdir -p output
 
-      # Primeira execução descarrega dados automaticamente para ~/.cache/mhcore
+      # Sem MHCORE_DATA — mhcore usa ~/.cache/mhcore e descarrega os dados
+      # automaticamente na primeira importação se o cache não existir.
       - name: Gerar personagem (Fase 1)
-        env:
-          MHCORE_DATA: ${{ runner.temp }}/mhcore_data
         run: |
           echo "=== A iniciar generate.py ==="
           python scripts/generate.py \
@@ -89,7 +90,7 @@ jobs:
 
           if [ ! -f output/character.fbx ] && [ ! -f output/character.obj ]; then
             echo "ERRO: Nenhum mesh exportado pela Fase 1"
-            tail -40 output/generate.log
+            tail -50 output/generate.log
             exit 1
           fi
 
@@ -100,17 +101,16 @@ jobs:
             python3 -c "
           import json
           r = json.load(open('output/generate_report.json'))
-          print('Status    :', 'OK' if r.get('success') else 'FALHOU')
-          print('mhcore    :', r.get('mhcore_version','?'))
+          print('Status     :', 'OK' if r.get('success') else 'FALHOU')
+          print('mhcore     :', r.get('mhcore_version','?'))
           print('Morfologias:', r.get('morphs_total', 0))
-          print('Assets    :', r.get('assets_total', 0))
-          print('Ficheiros :', r.get('output_files', []))
+          print('Assets     :', r.get('assets_total', 0))
+          print('Ficheiros  :', r.get('output_files', []))
           if r.get('warnings'): print('Avisos:', len(r['warnings']))
           if r.get('errors'):   print('Erros:', r['errors'])
           "
           fi
 
-      # Partilhar o FBX e relatório com o Job 2
       - name: Upload artefactos da Fase 1
         uses: actions/upload-artifact@v4
         with:
@@ -122,7 +122,7 @@ jobs:
             output/generate_report.json
             output/generate.log
           if-no-files-found: warn
-          retention-days: 1   # temporário — apenas para passar ao Job 2
+          retention-days: 1
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JOB 2 — BLENDER PIPELINE
@@ -137,7 +137,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Dependências headless do Blender ──────────────────────────────────
       - name: Instalar dependências headless
         run: |
           sudo apt-get update -qq
@@ -146,7 +145,6 @@ jobs:
             libxfixes3 libxrender1 libxkbcommon0 libsm6 \
             curl xz-utils python3-pip
 
-      # ── Blender 4.2.9 LTS ─────────────────────────────────────────────────
       - name: Cache Blender
         id: cache-blender
         uses: actions/cache@v4
@@ -162,7 +160,6 @@ jobs:
             "https://download.blender.org/release/Blender4.2/blender-4.2.9-linux-x64.tar.xz"
           tar -xf blender.tar.xz
           rm blender.tar.xz
-          echo "Blender extraído"
 
       - name: Adicionar Blender ao PATH
         run: echo "${{ github.workspace }}/blender-4.2.9-linux-x64" >> $GITHUB_PATH
@@ -170,11 +167,9 @@ jobs:
       - name: Verificar Blender
         run: blender --version
 
-      # ── Instalar pygltflib para validação ─────────────────────────────────
       - name: Instalar pygltflib
         run: pip install --quiet pygltflib
 
-      # ── Descarregar mesh da Fase 1 ────────────────────────────────────────
       - name: Download artefactos da Fase 1
         uses: actions/download-artifact@v4
         with:
@@ -185,18 +180,11 @@ jobs:
         run: |
           echo "=== Ficheiros da Fase 1 ==="
           ls -lh output/
-          if [ -f output/generate_report.json ]; then
-            cat output/generate_report.json | python3 -m json.tool | head -20
-          fi
 
-      # ── Executar pipeline Blender ──────────────────────────────────────────
       - name: Executar pipeline Blender (Fase 2)
-        env:
-          OUTPUT_DIR: ${{ github.workspace }}/output
         run: |
           echo "=== A iniciar Blender ==="
 
-          # Determinar ficheiro de entrada (FBX tem prioridade)
           if [ -f output/character.fbx ]; then
             INPUT="${{ github.workspace }}/output/character.fbx"
             echo "Entrada: FBX"
@@ -216,7 +204,6 @@ jobs:
             2>&1 | tee output/blender_pipeline.log
 
           BLENDER_EXIT=${PIPESTATUS[0]}
-          echo ""
           echo "=== Blender terminou com código: $BLENDER_EXIT ==="
           echo ""
           echo "=== Ficheiros produzidos ==="
@@ -225,45 +212,42 @@ jobs:
           if [ ! -f output/character.glb ]; then
             echo ""
             echo "=== ERRO: character.glb não foi criado ==="
-            echo "=== Últimas 60 linhas do log ==="
             tail -60 output/blender_pipeline.log
             exit 1
           fi
 
           echo "GLB: $(du -sh output/character.glb | cut -f1)"
 
-      # ── Verificar resultados ───────────────────────────────────────────────
       - name: Verificar resultados
         if: always()
         run: |
           echo "=== Ficheiros finais ==="
           ls -lh output/ 2>/dev/null || echo "(vazio)"
 
-          for report in output/pipeline_report.json output/generate_report.json; do
-            if [ -f "$report" ]; then
+          for rep in output/pipeline_report.json output/generate_report.json; do
+            if [ -f "$rep" ]; then
               echo ""
-              echo "=== $(basename $report) ==="
+              echo "=== $(basename $rep) ==="
               python3 -c "
-          import json, sys
-          r = json.load(open('$report'))
+          import json
+          r = json.load(open('$rep'))
           print('Status    :', 'OK' if r.get('success') else 'FALHOU')
           print('Fase      :', r.get('phase','?'))
           for k in ('blender','mhcore_version','vertices','meshes','materials','hair_cards'):
               if k in r: print(f'{k:12}: {r[k]}')
           print('Ficheiros :', r.get('output_files',[]))
           if r.get('errors'): print('Erros:', r['errors'])
-          " 2>/dev/null || cat "$report"
+          " 2>/dev/null || cat "$rep"
             fi
           done
 
           if [ -f output/blender_pipeline.log ]; then
             echo ""
-            echo "=== Erros/avisos no log do Blender ==="
+            echo "=== Erros no log do Blender ==="
             grep -i "error\|traceback\|exception\|failed" \
               output/blender_pipeline.log | head -30 || echo "(sem erros)"
           fi
 
-      # ── Validar GLB ────────────────────────────────────────────────────────
       - name: Validar GLB (pygltflib)
         if: success()
         run: |
@@ -292,7 +276,6 @@ jobs:
           print("=" * 50)
           PYEOF
 
-      # ── Publicar todos os artefactos ───────────────────────────────────────
       - name: Upload artefactos finais
         if: always()
         uses: actions/upload-artifact@v4
