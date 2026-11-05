@@ -37,15 +37,27 @@ jobs:
       - name: Verify Blender
         run: blender --version
 
-      # ── 3. Instalar MPFB2 como extensão Blender ──────────────────────────
+      # ── 3. Instalar MPFB2 como add-on CLÁSSICO (não como extensão) ───────
+      #
+      #  O sistema de Extensões do Blender 4.2 regista pacotes instalados
+      #  via "extension install-file" sob o namespace bl_ext.<repo>.<pkg>
+      #  (ex.: bl_ext.user_default.mpfb), não sob o nome simples do pacote.
+      #  Por isso bpy.ops.preferences.addon_enable(module="mpfb") falhava
+      #  com "'module' object is not callable" — o módulo "mpfb" nesse
+      #  namespace simplesmente não existe.
+      #
+      #  Solução: instalar o MPFB2 como add-on clássico, copiando a pasta
+      #  "mpfb" directamente para scripts/addons dentro de um
+      #  BLENDER_USER_SCRIPTS dedicado. Add-ons clássicos mantêm o nome de
+      #  módulo simples ("mpfb"), que é exactamente o que o script Python
+      #  já espera.
       - name: Clone and install MPFB2
         run: |
           git clone --depth 1 https://github.com/makehumancommunity/mpfb2.git
-          cd mpfb2/src
-          zip -r ../../mpfb.zip mpfb
-          cd ../..
-          blender -b --command extension install-file -r user_default -e mpfb.zip
-          echo "MPFB2 installed."
+          mkdir -p "${{ github.workspace }}/user_scripts/addons"
+          cp -r mpfb2/src/mpfb "${{ github.workspace }}/user_scripts/addons/mpfb"
+          echo "MPFB2 installed as classic add-on at user_scripts/addons/mpfb"
+          ls "${{ github.workspace }}/user_scripts/addons"
 
       # ── 4. Instalar gltf_validator binário nativo (KhronosGroup) ─────────
       - name: Install gltf_validator binary
@@ -68,7 +80,7 @@ jobs:
           blender -b --python scripts/generate_character.py -- \
             --output "${{ github.workspace }}/output"
         env:
-          BLENDER_USER_EXTENSIONS: "${{ github.workspace }}/blender-4.2.9-linux-x64/4.2/extensions"
+          BLENDER_USER_SCRIPTS: "${{ github.workspace }}/user_scripts"
 
       # ── 6b. DEBUG — listar tudo o que está em output/ ────────────────────
       - name: Debug output directory
